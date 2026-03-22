@@ -10,7 +10,7 @@ from typing import Callable, Optional
 import click
 
 from .analyzers.llm_analyzer import LLMAnalyzer
-from .injector.embedding import EmbeddingInjector
+from .injector.simple import SimpleInjector
 from .models import (
     AuditReport,
     CandidateFix,
@@ -194,6 +194,122 @@ class EvalManager:
 
         return promoted
 
+    def generate_synthetic(self, num_cases: int = 20) -> int:
+        """LLM generates edge-case variations from existing traces.
+
+        Takes successful traces and asks LLM to create variations with
+        different edge cases: missing fields, unusual formats, boundary
+        conditions, etc.
+
+        Returns count of generated cases.
+        """
+        from .utils.llm import get_openai_client, parse_json_from_llm
+
+        traces = self._store.get_traces(status="success", limit=10)
+        if not traces:
+            logger.info("No successful traces to generate synthetic evals from.")
+            return 0
+
+        examples = []
+        for t in traces[:5]:
+            examples.append({"task": t.task_input, "output": (t.final_output or "")[:200]})
+
+        import json
+        examples_json = json.dumps(examples, indent=2)
+
+        client = get_openai_client()
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"You are an eval case generator. Given {len(examples)} successful task examples, "
+                            f"generate {num_cases} variations with different edge cases: "
+                            "missing fields, unusual formats, boundary conditions, adversarial inputs, "
+                            "ambiguous phrasing, etc.\n\n"
+                            "Output JSON:\n"
+                            '{"cases": [{"task_input": "...", "tags": ["edge_case_type"]}, ...]}'
+                        ),
+                    },
+                    {"role": "user", "content": f"Examples:\n{examples_json}"},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.8,
+            )
+            parsed = parse_json_from_llm(response.choices[0].message.content or "")
+            if not parsed or "cases" not in parsed:
+                return 0
+
+            count = 0
+            for case_data in parsed["cases"][:num_cases]:
+                case = EvalCase(
+                    task_input=case_data.get("task_input", ""),
+                    tags=case_data.get("tags", ["synthetic"]),
+                    source="synthetic",
+                )
+                if case.task_input:
+                    self._store.store_eval_case(case)
+                    count += 1
+            return count
+
+        except Exception as e:
+            logger.error(f"Synthetic eval generation failed: {e}")
+            return 0
+
+    def generate_from_failures(self, failure_pattern: str, num_cases: int = 10) -> int:
+        """Generate test cases targeting a specific failure pattern.
+
+        Takes a failure description and asks LLM to generate tasks that
+        specifically test this failure mode with varying difficulty.
+
+        Returns count of generated cases.
+        """
+        from .utils.llm import get_openai_client, parse_json_from_llm
+
+        client = get_openai_client()
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"You are an eval case generator. The agent fails on this pattern:\n"
+                            f'"{failure_pattern}"\n\n'
+                            f"Generate {num_cases} tasks that specifically test this failure mode "
+                            "with varying difficulty (easy, medium, hard).\n\n"
+                            "Output JSON:\n"
+                            '{"cases": [{"task_input": "...", "difficulty": "easy|medium|hard", '
+                            '"tags": ["failure_targeted"]}, ...]}'
+                        ),
+                    },
+                    {"role": "user", "content": "Generate the test cases."},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.7,
+            )
+            parsed = parse_json_from_llm(response.choices[0].message.content or "")
+            if not parsed or "cases" not in parsed:
+                return 0
+
+            count = 0
+            for case_data in parsed["cases"][:num_cases]:
+                case = EvalCase(
+                    task_input=case_data.get("task_input", ""),
+                    tags=case_data.get("tags", ["failure_targeted"]) + [failure_pattern[:50]],
+                    source="failure_targeted",
+                )
+                if case.task_input:
+                    self._store.store_eval_case(case)
+                    count += 1
+            return count
+
+        except Exception as e:
+            logger.error(f"Failure-targeted eval generation failed: {e}")
+            return 0
+
 
 class Engine:
     """Core orchestrator — ties all components together."""
@@ -210,11 +326,17 @@ class Engine:
         knowledge_store=None,
         require_human_approval: bool = True,
         injection_enabled: bool = True,
+        auto_inject: bool = True,
+        control_percentage: float = 0.0,
         learning_budget_per_day: Optional[float] = None,
+        approval_callback: Optional[Callable] = None,
     ):
         self.model = model
         self.injection_enabled = injection_enabled
+        self.auto_inject = auto_inject
+        self.control_percentage = control_percentage
         self.require_human_approval = require_human_approval
+        self._approval_callback = approval_callback
 
         # Cost tracking
         self._cost_tracker = CostTracker(budget_per_day=learning_budget_per_day)
@@ -225,42 +347,101 @@ class Engine:
         self._analyzer = analyzer or LLMAnalyzer(model=model, cost_tracker=self._cost_tracker)
         self._validator = validator or HumanInLoopValidator()
         self._signal = signal or LLMJudge(model=model, cost_tracker=self._cost_tracker)
-        self._injector = injector or EmbeddingInjector()
+        self._injector = injector or SimpleInjector()
 
         # Managers
         self._knowledge_manager = KnowledgeManager(self._store)
         self._eval_manager = EvalManager(self._store)
 
+        # Injection tracking (set by get_knowledge / auto-inject, read by trace decorator)
+        self._last_injection = InjectionResult()
+
     # === Public API: Runtime ===
 
-    def trace(self, func):
-        """Decorator that auto-traces an agent function.
+    def get_knowledge(self, task_input: str) -> str:
+        """Get relevant knowledge for a task as formatted text.
 
-        The decorated function must accept a `knowledge` keyword argument
-        (or **kwargs) to receive injected knowledge.
+        Call this inside your agent function to pull learned knowledge.
+        Returns an empty string if no knowledge is available or injection
+        is disabled.
+
+        Usage:
+            @engine.trace
+            def my_agent(task_input):
+                knowledge = engine.get_knowledge(task_input)
+                return call_llm(task_input, system_prompt=f"...\\n\\n{knowledge}")
+        """
+        if not self.injection_enabled:
+            return ""
+        try:
+            injection = self._injector.inject(task_input, self._store)
+            self._last_injection = injection
+            return injection.system_prompt_additions
+        except Exception as e:
+            logger.warning(f"get_knowledge failed: {e}")
+            return ""
+
+    def trace(self, func):
+        """Decorator that observes an agent function.
+
+        Records traces (input, output, steps) and evaluates outcomes.
+
+        When auto_inject=True (default), knowledge is automatically prepended
+        to the system prompt of LLM calls made through wrapped OpenAI/Anthropic
+        clients. No changes to the agent function needed.
+
+        When auto_inject=False, call engine.get_knowledge() inside your agent
+        to manually pull knowledge.
         """
         @functools.wraps(func)
-        def wrapper(task_input: str, **kwargs):
-            # 1. Inject knowledge
-            injection = InjectionResult()
-            if self.injection_enabled:
+        def wrapper(*args, **kwargs):
+            import random
+
+            # Determine task_input from first positional arg
+            task_input = args[0] if args else kwargs.get("task_input", "")
+
+            # A/B control: decide if this is a control run
+            is_control = (
+                self.control_percentage > 0
+                and random.random() < self.control_percentage
+            )
+
+            # Reset last injection tracking
+            self._last_injection = InjectionResult()
+
+            # Auto-inject: pre-fetch knowledge so it's available for LLM interception
+            _saved_injection_enabled = self.injection_enabled
+            if is_control:
+                self.injection_enabled = False
+
+            from .tracers.generic_llm import _pending_knowledge as _pk_var
+
+            if self.auto_inject and self.injection_enabled:
                 try:
                     injection = self._injector.inject(task_input, self._store)
+                    self._last_injection = injection
+                    _pk_var.set(injection.system_prompt_additions)
                 except Exception as e:
-                    logger.warning(f"Injection failed: {e}")
+                    logger.warning(f"Auto-inject failed: {e}")
+                    _pk_var.set("")
+            else:
+                _pk_var.set("")
 
-            # 2. Start trace
-            trace_id = self._tracer.start_trace(task_input, metadata=kwargs)
+            # 1. Start trace
+            trace_id = self._tracer.start_trace(
+                task_input,
+                metadata={"is_control": is_control} if is_control else {},
+            )
 
-            # 3. Run agent function
+            # 2. Run agent function — unmodified, user's args only
             try:
-                result = func(task_input, knowledge=injection.system_prompt_additions, **kwargs)
+                result = func(*args, **kwargs)
             except Exception as e:
                 from .models import Step, StepType
 
                 error_step = Step(
                     step_type=StepType.ERROR,
-                    input_context=task_input,
+                    input_context=str(task_input),
                     decision="Run agent function",
                     result=str(e),
                 )
@@ -271,13 +452,17 @@ class Engine:
                     reasoning=f"Agent raised exception: {e}",
                 )
                 trace_obj = self._tracer.end_trace(trace_id, outcome, final_output="")
-                trace_obj.injected_knowledge = injection.items_injected
+                trace_obj.injected_knowledge = self._last_injection.items_injected
                 self._store.store_trace(trace_obj)
+                self.injection_enabled = _saved_injection_enabled
+                _pk_var.set("")
                 raise
 
-            # 4. Evaluate outcome
+            # 3. Evaluate outcome
             temp_outcome = Outcome(status=OutcomeStatus.PARTIAL, score=0.5)
-            trace_obj = self._tracer.end_trace(trace_id, temp_outcome, final_output=str(result))
+            trace_obj = self._tracer.end_trace(
+                trace_id, temp_outcome, final_output=str(result)
+            )
 
             try:
                 outcome = self._signal.evaluate(trace_obj)
@@ -290,24 +475,29 @@ class Engine:
                     reasoning=f"Evaluation failed: {e}",
                 )
 
-            # 5. Store trace
-            trace_obj.injected_knowledge = injection.items_injected
+            # 4. Store trace
+            trace_obj.injected_knowledge = self._last_injection.items_injected
+            if is_control:
+                trace_obj.environment["is_control"] = True
             self._store.store_trace(trace_obj)
 
-            # 6. Update effectiveness
-            for item_id in injection.items_injected:
+            # 5. Update effectiveness for injected knowledge
+            for item_id in self._last_injection.items_injected:
                 helped = trace_obj.outcome.status == OutcomeStatus.SUCCESS
                 try:
                     self._store.update_effectiveness(item_id, helped=helped)
                 except Exception as e:
                     logger.warning(f"Failed to update effectiveness for {item_id}: {e}")
 
+            self.injection_enabled = _saved_injection_enabled
+            _pk_var.set("")
+
             return result
 
         return wrapper
 
     def run(self, agent_func: Callable, task: str, **kwargs) -> str:
-        """Run an agent function with automatic tracing and injection."""
+        """Run an agent function with automatic tracing."""
         traced = self.trace(agent_func)
         return traced(task, **kwargs)
 
@@ -417,7 +607,10 @@ class Engine:
             return ""
 
         try:
-            result = self._validator.validate(candidate, eval_set, agent_runner)
+            result = self._validator.validate(
+                candidate, eval_set, agent_runner,
+                approval_callback=self._approval_callback,
+            )
         except Exception as e:
             logger.error(f"Validation failed for {candidate.fix_id}: {e}")
             report.candidates_rejected += 1
@@ -522,4 +715,104 @@ class Engine:
             current_accuracy=current_accuracy,
             improvement=improvement,
             next_milestones=milestones,
+        )
+
+    # === Public API: A/B Control ===
+
+    def injection_lift(self) -> LiftReport:
+        """Compare treatment (with knowledge) vs control (without) performance.
+
+        Requires traces with is_control metadata set by the trace decorator
+        when control_percentage > 0.
+        """
+        from .models import LiftReport
+        from .validators.statistical import _welchs_t_test
+
+        all_traces = self._store.get_traces(limit=500)
+        treatment = [
+            t.outcome.score for t in all_traces
+            if t.outcome and t.outcome.score is not None
+            and not t.environment.get("is_control", False)
+        ]
+        control = [
+            t.outcome.score for t in all_traces
+            if t.outcome and t.outcome.score is not None
+            and t.environment.get("is_control", False)
+        ]
+
+        if not treatment or not control:
+            return LiftReport(recommendation="Not enough data. Need both treatment and control traces.")
+
+        t_avg = sum(treatment) / len(treatment)
+        c_avg = sum(control) / len(control)
+        lift = t_avg - c_avg
+        confidence = _welchs_t_test(control, treatment)
+
+        return LiftReport(
+            treatment_avg=t_avg,
+            control_avg=c_avg,
+            lift=lift,
+            significant=confidence >= 0.8,
+            treatment_count=len(treatment),
+            control_count=len(control),
+            recommendation=(
+                "Knowledge injection is helping"
+                if lift > 0 and confidence >= 0.8
+                else "Knowledge injection may not be providing value"
+            ),
+        )
+
+    # === Public API: Blame Attribution ===
+
+    def blame_analysis(self, trace_id: str) -> BlameReport:
+        """Identify which injected knowledge might have caused a failure."""
+        from .models import BlameReport
+
+        trace = self._store.get_trace(trace_id)
+        if trace is None:
+            return BlameReport(trace_id=trace_id, recommendation="Trace not found")
+
+        if not trace.injected_knowledge:
+            return BlameReport(
+                trace_id=trace_id,
+                recommendation="No knowledge was injected in this trace",
+            )
+
+        candidates = []
+        for item_id in trace.injected_knowledge:
+            item = self._store.get(item_id)
+            if item is None:
+                continue
+
+            is_new = item.times_injected < 10
+
+            # Count recent failures where this item was injected
+            recent_traces = self._store.get_traces(limit=20)
+            recent_failures = sum(
+                1 for t in recent_traces
+                if t.outcome and t.outcome.status == OutcomeStatus.FAILURE
+                and item_id in t.injected_knowledge
+            )
+
+            if is_new or recent_failures > 5:
+                candidates.append({
+                    "item_id": item_id,
+                    "is_new": is_new,
+                    "recent_failure_rate": recent_failures / max(len(recent_traces), 1),
+                    "content_preview": item.content[:100],
+                    "effectiveness_rate": item.effectiveness_rate,
+                })
+
+        recommendation = (
+            "Review new items — recently promoted knowledge may be causing issues"
+            if any(c["is_new"] for c in candidates)
+            else "Likely unrelated to knowledge"
+            if not candidates
+            else "Some items show high failure correlation"
+        )
+
+        return BlameReport(
+            trace_id=trace_id,
+            candidates=candidates,
+            recommendation=recommendation,
         )

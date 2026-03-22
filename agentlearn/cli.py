@@ -426,5 +426,175 @@ def eval_generate(ctx, from_traces, min_confidence):
         click.echo("  No traces eligible for promotion (need high-confidence successes).")
 
 
+@eval_group.command("synthetic")
+@click.option("--count", default=20, type=int, help="Number of synthetic cases to generate")
+@click.pass_context
+def eval_synthetic(ctx, count):
+    """Generate synthetic eval cases using LLM edge-case variations."""
+    engine = _get_engine(ctx.obj["store"])
+    generated = engine.eval.generate_synthetic(num_cases=count)
+    click.echo(f"  Generated {generated} synthetic eval cases.")
+
+
+@eval_group.command("from-failures")
+@click.option("--pattern", required=True, help="Failure pattern to target")
+@click.option("--count", default=10, type=int, help="Number of cases to generate")
+@click.pass_context
+def eval_from_failures(ctx, pattern, count):
+    """Generate eval cases targeting a specific failure pattern."""
+    engine = _get_engine(ctx.obj["store"])
+    generated = engine.eval.generate_from_failures(failure_pattern=pattern, num_cases=count)
+    click.echo(f"  Generated {generated} failure-targeted eval cases.")
+
+
+# === Traces Search (FTS5) ===
+
+
+@traces.command("search")
+@click.argument("query")
+@click.option("--limit", default=20, type=int, help="Max results")
+@click.pass_context
+def traces_search(ctx, query, limit):
+    """Full-text search across traces."""
+    engine = _get_engine(ctx.obj["store"])
+    results = engine._store.search_traces(query, limit=limit)
+
+    if not results:
+        click.echo(f"  No traces matching '{query}'.")
+        return
+
+    click.echo()
+    click.echo(f"  {len(results)} traces matching '{query}':")
+    click.echo()
+    click.echo(f"  {'ID':<10} {'Status':<10} {'Score':<8} Task")
+    click.echo(f"  {'─' * 10} {'─' * 10} {'─' * 8} {'─' * 40}")
+
+    for t in results:
+        status_val = t.outcome.status.value if t.outcome else "unknown"
+        score = f"{t.outcome.score:.2f}" if t.outcome and t.outcome.score is not None else "n/a"
+        task_preview = t.task_input.replace("\n", " ")[:50]
+        click.echo(f"  {t.trace_id[:8]:<10} {status_val:<10} {score:<8} {task_preview}")
+    click.echo()
+
+
+# === Snapshots ===
+
+
+@cli.group()
+def snapshot():
+    """Knowledge store snapshot commands."""
+    pass
+
+
+@snapshot.command("create")
+@click.option("--tag", default=None, help="Tag for the snapshot")
+@click.pass_context
+def snapshot_create(ctx, tag):
+    """Create a snapshot of the current knowledge store."""
+    engine = _get_engine(ctx.obj["store"])
+    from .store.snapshots import SnapshotManager
+    mgr = SnapshotManager(engine._store)
+    snap_id = mgr.snapshot(tag=tag)
+    click.echo(f"  Created snapshot: {snap_id}" + (f" (tag: {tag})" if tag else ""))
+
+
+@snapshot.command("list")
+@click.pass_context
+def snapshot_list(ctx):
+    """List all snapshots."""
+    engine = _get_engine(ctx.obj["store"])
+    from .store.snapshots import SnapshotManager
+    mgr = SnapshotManager(engine._store)
+    snaps = mgr.list_snapshots()
+
+    if not snaps:
+        click.echo("  No snapshots found.")
+        return
+
+    click.echo()
+    click.echo(f"  {'ID':<25} {'Tag':<20} {'Items':<8} Created")
+    click.echo(f"  {'─' * 25} {'─' * 20} {'─' * 8} {'─' * 25}")
+    for s in snaps:
+        click.echo(f"  {s.snapshot_id:<25} {(s.tag or ''):<20} {s.item_count:<8} {s.created_at}")
+    click.echo()
+
+
+@snapshot.command("restore")
+@click.argument("snapshot_id")
+@click.pass_context
+def snapshot_restore(ctx, snapshot_id):
+    """Restore knowledge store from a snapshot."""
+    engine = _get_engine(ctx.obj["store"])
+    from .store.snapshots import SnapshotManager
+    mgr = SnapshotManager(engine._store)
+
+    if not click.confirm(f"  Restore snapshot '{snapshot_id}'? This replaces all current knowledge."):
+        click.echo("  Cancelled.")
+        return
+
+    count = mgr.restore(snapshot_id)
+    click.echo(f"  Restored {count} knowledge items from {snapshot_id}.")
+
+
+# === A/B Report ===
+
+
+@cli.command("ab-report")
+@click.pass_context
+def ab_report(ctx):
+    """Show A/B control group report."""
+    engine = _get_engine(ctx.obj["store"])
+    report = engine.injection_lift()
+
+    click.echo()
+    click.echo(click.style("  A/B Control Report", bold=True))
+    if report.treatment_count == 0 or report.control_count == 0:
+        click.echo(f"    {report.recommendation}")
+        click.echo()
+        return
+
+    click.echo(f"    Treatment (with knowledge): {report.treatment_avg:.1%} avg score ({report.treatment_count} runs)")
+    click.echo(f"    Control (without knowledge): {report.control_avg:.1%} avg score ({report.control_count} runs)")
+    click.echo(f"    Lift: {report.lift:+.1%}" + (" (significant)" if report.significant else " (not significant)"))
+    click.echo(f"    {report.recommendation}")
+    click.echo()
+
+
+# === Blame ===
+
+
+@traces.command("blame")
+@click.argument("trace_id")
+@click.pass_context
+def traces_blame(ctx, trace_id):
+    """Identify which knowledge items may have caused a failure."""
+    engine = _get_engine(ctx.obj["store"])
+
+    # Partial ID matching
+    all_traces = engine._store.get_traces(limit=200)
+    full_id = None
+    for t in all_traces:
+        if t.trace_id.startswith(trace_id):
+            full_id = t.trace_id
+            break
+
+    if not full_id:
+        click.echo(f"  Trace '{trace_id}' not found.")
+        return
+
+    report = engine.blame_analysis(full_id)
+    click.echo()
+    click.echo(click.style(f"  Blame Analysis: {full_id[:8]}", bold=True))
+    click.echo(f"    {report.recommendation}")
+
+    if report.candidates:
+        click.echo()
+        for c in report.candidates:
+            new_tag = " [NEW]" if c.get("is_new") else ""
+            click.echo(f"    {c['item_id'][:8]}{new_tag} — failure rate: {c['recent_failure_rate']:.0%}")
+            click.echo(f"      {c['content_preview']}")
+    click.echo()
+
+
 if __name__ == "__main__":
     cli()

@@ -69,7 +69,7 @@ class TestTraceDecorator:
         )
 
         @engine.trace
-        def my_agent(task_input, knowledge="", **kwargs):
+        def my_agent(task_input):
             return f"Result for: {task_input}"
 
         result = my_agent("test task")
@@ -81,13 +81,8 @@ class TestTraceDecorator:
         assert traces[0].task_input == "test task"
         assert traces[0].outcome.status == OutcomeStatus.SUCCESS
 
-    def test_trace_passes_knowledge(self, engine):
-        """Test that injected knowledge is passed to the function."""
-        engine._signal = MagicMock()
-        engine._signal.evaluate.return_value = Outcome(
-            status=OutcomeStatus.SUCCESS, score=0.9
-        )
-
+    def test_get_knowledge(self, engine):
+        """Test that get_knowledge returns relevant knowledge."""
         # Store active knowledge
         with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
             item = KnowledgeItem(
@@ -98,24 +93,16 @@ class TestTraceDecorator:
             )
             engine._store.store(item)
 
-        received_knowledge = {}
-
-        @engine.trace
-        def my_agent(task_input, knowledge="", **kwargs):
-            received_knowledge["value"] = knowledge
-            return "done"
-
-        my_agent("Process some data")
-        # Knowledge may or may not be injected depending on embedding similarity
-        # but the kwarg should always be passed
-        assert "value" in received_knowledge
+        knowledge = engine.get_knowledge("Process some data")
+        # Should return a string (may be empty if embeddings don't match)
+        assert isinstance(knowledge, str)
 
     def test_trace_handles_exception(self, engine):
         """Test that exceptions are recorded and re-raised."""
         engine._signal = MagicMock()
 
         @engine.trace
-        def failing_agent(task_input, knowledge="", **kwargs):
+        def failing_agent(task_input):
             raise ValueError("Agent crashed")
 
         with pytest.raises(ValueError, match="Agent crashed"):
@@ -135,8 +122,9 @@ class TestTraceDecorator:
         )
 
         @engine.trace
-        def my_agent(task_input, knowledge="", **kwargs):
-            assert knowledge == ""
+        def my_agent(task_input):
+            # get_knowledge returns "" when injection disabled
+            assert engine.get_knowledge(task_input) == ""
             return "done"
 
         my_agent("test")
@@ -166,7 +154,9 @@ class TestTraceDecorator:
         )
 
         @engine.trace
-        def my_agent(task_input, knowledge="", **kwargs):
+        def my_agent(task_input):
+            # Call get_knowledge to trigger injection tracking
+            engine.get_knowledge(task_input)
             return "done"
 
         my_agent("test")
@@ -183,7 +173,7 @@ class TestRunMethod:
             status=OutcomeStatus.SUCCESS, score=0.9
         )
 
-        def my_agent(task_input, knowledge="", **kwargs):
+        def my_agent(task_input):
             return f"Result: {task_input}"
 
         result = engine.run(my_agent, "test")

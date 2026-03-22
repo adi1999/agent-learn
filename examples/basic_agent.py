@@ -12,11 +12,14 @@ engine = Engine(model="gpt-4o-mini")
 
 
 @engine.trace
-def my_agent(task_input: str, knowledge: str = "", **kwargs) -> str:
+def my_agent(task_input: str) -> str:
     """A simple agent that answers questions using OpenAI."""
     from openai import OpenAI
 
     client = OpenAI()
+
+    # Pull learned knowledge (returns "" if nothing relevant)
+    knowledge = engine.get_knowledge(task_input)
 
     system_prompt = "You are a helpful assistant. Answer concisely."
     if knowledge:

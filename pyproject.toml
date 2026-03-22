@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentlearn"
-version = "0.1.0"
+version = "0.3.0"
 description = "A recursive learning framework that gives any AI agent a self-improvement loop with memory"
 readme = "README.md"
 license = "MIT"

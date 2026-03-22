@@ -3,6 +3,7 @@
 from .engine import Engine
 from .models import (
     AuditReport,
+    BlameReport,
     CandidateFix,
     EngineStatus,
     EvalCase,
@@ -12,6 +13,7 @@ from .models import (
     KnowledgeItem,
     KnowledgeStatus,
     LearningReport,
+    LiftReport,
     Outcome,
     OutcomeStatus,
     Step,
@@ -20,11 +22,12 @@ from .models import (
     ValidationResult,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Engine",
     "AuditReport",
+    "BlameReport",
     "CandidateFix",
     "EngineStatus",
     "EvalCase",
@@ -34,6 +37,7 @@ __all__ = [
     "KnowledgeItem",
     "KnowledgeStatus",
     "LearningReport",
+    "LiftReport",
     "Outcome",
     "OutcomeStatus",
     "Step",

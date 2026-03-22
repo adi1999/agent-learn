@@ -207,3 +207,19 @@ class AuditReport(BaseModel):
     insufficient_data: list[str] = Field(default_factory=list)
     total_active: int = 0
     avg_effectiveness: float = 0.0
+
+
+class LiftReport(BaseModel):
+    treatment_avg: float = 0.0
+    control_avg: float = 0.0
+    lift: float = 0.0
+    significant: bool = False
+    treatment_count: int = 0
+    control_count: int = 0
+    recommendation: str = ""
+
+
+class BlameReport(BaseModel):
+    trace_id: str
+    candidates: list[dict] = Field(default_factory=list)
+    recommendation: str = ""

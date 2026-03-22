@@ -11,10 +11,33 @@ from ..utils.logging import get_logger
 
 logger = get_logger("tracer")
 
-# Thread-safe context var for active trace_id
+# Thread-safe context vars
 _active_trace_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "_active_trace_id", default=None
 )
+
+# Pending knowledge to auto-inject into LLM calls (set by Engine)
+_pending_knowledge: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_pending_knowledge", default=""
+)
+
+
+def _inject_knowledge_into_messages(messages: list[dict], knowledge: str) -> list[dict]:
+    """Prepend knowledge to the system message in an OpenAI-format message list."""
+    if not knowledge:
+        return messages
+
+    messages = [dict(m) for m in messages]  # Shallow copy
+
+    # Find and augment the system message
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "system":
+            messages[i] = {**msg, "content": f"{msg['content']}\n\n{knowledge}"}
+            return messages
+
+    # No system message — prepend one
+    messages.insert(0, {"role": "system", "content": knowledge})
+    return messages
 
 
 class GenericLLMTracer:
@@ -86,6 +109,16 @@ class GenericLLMTracer:
                 logger.warning("Streaming not supported for tracing in Phase 1. Recording skipped.")
                 return original_create(*args, **kwargs)
 
+            # Auto-inject: prepend knowledge to system message if available
+            knowledge = _pending_knowledge.get("")
+            if knowledge:
+                kwargs = dict(kwargs)
+                messages = list(kwargs.get("messages", args[0] if args else []))
+                messages = _inject_knowledge_into_messages(messages, knowledge)
+                kwargs["messages"] = messages
+                if args:
+                    args = (messages, *args[1:])
+
             start_time = time.time()
             messages = kwargs.get("messages", args[0] if args else [])
             model = kwargs.get("model", "unknown")
@@ -148,6 +181,16 @@ class GenericLLMTracer:
             if kwargs.get("stream", False):
                 logger.warning("Streaming not supported for tracing in Phase 1. Recording skipped.")
                 return original_create(*args, **kwargs)
+
+            # Auto-inject: prepend knowledge to system param for Anthropic
+            knowledge = _pending_knowledge.get("")
+            if knowledge:
+                kwargs = dict(kwargs)
+                system = kwargs.get("system", "")
+                if system:
+                    kwargs["system"] = f"{system}\n\n{knowledge}"
+                else:
+                    kwargs["system"] = knowledge
 
             start_time = time.time()
             messages = kwargs.get("messages", [])

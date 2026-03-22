@@ -1,6 +1,8 @@
 """Human-in-the-loop validator — presents candidate fixes for CLI approval."""
 
-from typing import Callable
+from __future__ import annotations
+
+from typing import Callable, Optional
 
 import click
 
@@ -19,15 +21,33 @@ FIX_TYPE_COLORS = {
 
 
 class HumanInLoopValidator:
-    """Presents candidate fixes to a human for approval via CLI."""
+    """Presents candidate fixes to a human for approval.
+
+    Uses approval_callback if provided (platform-agnostic),
+    otherwise falls back to CLI prompts via Click.
+    """
 
     def validate(
         self,
         candidate: CandidateFix,
         eval_set: list[EvalCase],
         agent_runner: Callable[[str, list[str]], str],
+        approval_callback: Optional[Callable[[CandidateFix], bool]] = None,
     ) -> ValidationResult:
         """Present a candidate fix for human review."""
+        # Use callback if provided (web dashboard, notebook, API, etc.)
+        if approval_callback is not None:
+            approved = approval_callback(candidate)
+            return ValidationResult(
+                passed=approved,
+                confidence=1.0,
+            )
+
+        # Default: CLI prompt
+        return self._cli_review(candidate)
+
+    def _cli_review(self, candidate: CandidateFix) -> ValidationResult:
+        """Interactive CLI review with approve/reject/skip/edit."""
         self._display_candidate(candidate)
 
         while True:

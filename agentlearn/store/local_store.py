@@ -104,6 +104,29 @@ class LocalStore:
                 CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge(status);
                 CREATE INDEX IF NOT EXISTS idx_traces_analyzed ON traces(analyzed);
                 CREATE INDEX IF NOT EXISTS idx_traces_outcome ON traces(outcome_status);
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS traces_fts USING fts5(
+                    task_input, final_output, outcome_reasoning,
+                    content=traces, content_rowid=rowid
+                );
+
+                -- Triggers to keep FTS in sync
+                CREATE TRIGGER IF NOT EXISTS traces_ai AFTER INSERT ON traces BEGIN
+                    INSERT INTO traces_fts(rowid, task_input, final_output, outcome_reasoning)
+                    VALUES (NEW.rowid, NEW.task_input, NEW.final_output, NEW.outcome_reasoning);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS traces_ad AFTER DELETE ON traces BEGIN
+                    INSERT INTO traces_fts(traces_fts, rowid, task_input, final_output, outcome_reasoning)
+                    VALUES ('delete', OLD.rowid, OLD.task_input, OLD.final_output, OLD.outcome_reasoning);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS traces_au AFTER UPDATE ON traces BEGIN
+                    INSERT INTO traces_fts(traces_fts, rowid, task_input, final_output, outcome_reasoning)
+                    VALUES ('delete', OLD.rowid, OLD.task_input, OLD.final_output, OLD.outcome_reasoning);
+                    INSERT INTO traces_fts(rowid, task_input, final_output, outcome_reasoning)
+                    VALUES (NEW.rowid, NEW.task_input, NEW.final_output, NEW.outcome_reasoning);
+                END;
             """)
 
     def close(self) -> None:
@@ -367,6 +390,19 @@ class LocalStore:
         if row is None:
             return None
         return self._row_to_trace(row)
+
+    def search_traces(self, query: str, limit: int = 50) -> list[Trace]:
+        """Full-text search across traces using FTS5."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT traces.* FROM traces_fts
+                   JOIN traces ON traces.rowid = traces_fts.rowid
+                   WHERE traces_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (query, limit),
+            ).fetchall()
+        return [self._row_to_trace(row) for row in rows]
 
     def count_traces(self) -> dict[str, int]:
         """Count traces by outcome status."""
