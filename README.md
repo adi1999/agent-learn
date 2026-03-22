@@ -11,30 +11,26 @@ from openai import OpenAI
 engine = Engine()
 client = OpenAI()
 
-# Wrap your OpenAI client — enables tracing and auto-injection
-engine._tracer.wrap_openai(client)
-
-# Add @engine.trace — zero changes to your agent function
 @engine.trace
 def my_agent(task_input):
+    knowledge = engine.get_knowledge(task_input)
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": f"You are a helpful assistant.\n\n{knowledge}"},
             {"role": "user", "content": task_input},
         ],
     )
     return response.choices[0].message.content
 
-# Run your agent as normal — traces are collected, knowledge auto-injected
+# Run your agent — traces are collected automatically
 result = my_agent("What is compound interest on $1000 at 5% for 3 years?")
 
 # After collecting traces, run the learning cycle
 report = engine.learn()
-print(f"Promoted {report.candidates_promoted} knowledge items")
 ```
 
-Knowledge is automatically prepended to your system prompt. No code changes to your agent needed. To disable auto-injection: `Engine(auto_inject=False)`.
+`@engine.trace` observes your agent (input, output, outcome). `engine.get_knowledge()` returns learned rules for the current task — one line to opt in, remove it to opt out.
 
 ## How it works
 
@@ -43,10 +39,10 @@ Agent runs → Trace (observe) → Analyze (extract lessons) → Validate (test 
     ↑            → Store (knowledge) → Inject (next run) → Agent runs better ─┘
 ```
 
-1. **Trace** — `@engine.trace` observes every agent run (input, output, outcome). Pure observation — doesn't modify your agent.
+1. **Trace** — `@engine.trace` observes every agent run. Pure observation — doesn't modify your agent.
 2. **Analyze** — An LLM reads failed traces and suggests fixes (skills, checklists, rules)
 3. **Validate** — Fixes are A/B tested before promotion. Must improve by 5%+ with zero regressions.
-4. **Inject** — `engine.get_knowledge()` returns relevant rules for the current task. You decide where to put them.
+4. **Inject** — `engine.get_knowledge()` returns relevant rules. You decide where to put them.
 
 ## What the agent learns
 

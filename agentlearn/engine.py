@@ -326,14 +326,12 @@ class Engine:
         knowledge_store=None,
         require_human_approval: bool = True,
         injection_enabled: bool = True,
-        auto_inject: bool = True,
         control_percentage: float = 0.0,
         learning_budget_per_day: Optional[float] = None,
         approval_callback: Optional[Callable] = None,
     ):
         self.model = model
         self.injection_enabled = injection_enabled
-        self.auto_inject = auto_inject
         self.control_percentage = control_percentage
         self.require_human_approval = require_human_approval
         self._approval_callback = approval_callback
@@ -385,13 +383,9 @@ class Engine:
         """Decorator that observes an agent function.
 
         Records traces (input, output, steps) and evaluates outcomes.
+        Pure observation — doesn't modify the agent's arguments or behavior.
 
-        When auto_inject=True (default), knowledge is automatically prepended
-        to the system prompt of LLM calls made through wrapped OpenAI/Anthropic
-        clients. No changes to the agent function needed.
-
-        When auto_inject=False, call engine.get_knowledge() inside your agent
-        to manually pull knowledge.
+        To inject knowledge, call engine.get_knowledge() inside your agent.
         """
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -400,32 +394,18 @@ class Engine:
             # Determine task_input from first positional arg
             task_input = args[0] if args else kwargs.get("task_input", "")
 
-            # A/B control: decide if this is a control run
+            # A/B control: decide if this is a control run (disable injection)
             is_control = (
                 self.control_percentage > 0
                 and random.random() < self.control_percentage
             )
 
-            # Reset last injection tracking
-            self._last_injection = InjectionResult()
-
-            # Auto-inject: pre-fetch knowledge so it's available for LLM interception
             _saved_injection_enabled = self.injection_enabled
             if is_control:
                 self.injection_enabled = False
 
-            from .tracers.generic_llm import _pending_knowledge as _pk_var
-
-            if self.auto_inject and self.injection_enabled:
-                try:
-                    injection = self._injector.inject(task_input, self._store)
-                    self._last_injection = injection
-                    _pk_var.set(injection.system_prompt_additions)
-                except Exception as e:
-                    logger.warning(f"Auto-inject failed: {e}")
-                    _pk_var.set("")
-            else:
-                _pk_var.set("")
+            # Reset injection tracking
+            self._last_injection = InjectionResult()
 
             # 1. Start trace
             trace_id = self._tracer.start_trace(
@@ -433,7 +413,7 @@ class Engine:
                 metadata={"is_control": is_control} if is_control else {},
             )
 
-            # 2. Run agent function — unmodified, user's args only
+            # 2. Run agent function — unmodified
             try:
                 result = func(*args, **kwargs)
             except Exception as e:
@@ -455,7 +435,6 @@ class Engine:
                 trace_obj.injected_knowledge = self._last_injection.items_injected
                 self._store.store_trace(trace_obj)
                 self.injection_enabled = _saved_injection_enabled
-                _pk_var.set("")
                 raise
 
             # 3. Evaluate outcome
@@ -490,8 +469,6 @@ class Engine:
                     logger.warning(f"Failed to update effectiveness for {item_id}: {e}")
 
             self.injection_enabled = _saved_injection_enabled
-            _pk_var.set("")
-
             return result
 
         return wrapper

@@ -6,19 +6,15 @@ Usage:
 """
 
 from agentlearn import Engine
+from openai import OpenAI
 
-# Create the engine (stores knowledge in ./knowledge/)
-engine = Engine(model="gpt-4o-mini")
+engine = Engine()
+client = OpenAI()
 
 
 @engine.trace
 def my_agent(task_input: str) -> str:
     """A simple agent that answers questions using OpenAI."""
-    from openai import OpenAI
-
-    client = OpenAI()
-
-    # Pull learned knowledge (returns "" if nothing relevant)
     knowledge = engine.get_knowledge(task_input)
 
     system_prompt = "You are a helpful assistant. Answer concisely."
@@ -36,7 +32,6 @@ def my_agent(task_input: str) -> str:
 
 
 def main():
-    # Run the agent on several tasks to collect traces
     tasks = [
         "What is compound interest on $1000 at 5% for 3 years?",
         "Convert 100 USD to EUR at today's rate.",
@@ -57,13 +52,10 @@ def main():
             print(f"Error: {e}")
             print()
 
-    # Check status
     status = engine.status()
     print(f"Traces collected: {status.traces_total}")
-    print(f"Success: {status.traces_success}, Failure: {status.traces_failure}")
-    print()
+    print(f"Success: {status.traces_success}, Failure: {status.traces_failure}\n")
 
-    # Run the learning cycle
     print("Running learning cycle...")
     report = engine.learn()
     print(f"Traces analyzed: {report.traces_analyzed}")
