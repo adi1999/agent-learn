@@ -13,24 +13,39 @@ logger = get_logger("tiered_analyzer")
 
 # Known failure patterns that don't need LLM analysis
 KNOWN_PATTERNS = [
-    (r"json\.?decode|invalid json|json parse", "json_parsing",
-     "Validate JSON structure before parsing. Check for empty responses, trailing commas, and unescaped characters."),
-    (r"timeout|timed?\s*out|deadline exceeded", "timeout",
-     "Add timeout handling with exponential backoff. Set explicit timeouts on all external calls."),
-    (r"rate.?limit|429|too many requests", "rate_limit",
-     "Implement rate limiting with backoff. Check rate limit headers before retrying."),
-    (r"auth|unauthorized|403|401|forbidden", "auth_failure",
-     "Verify credentials before making API calls. Check token expiration and refresh if needed."),
-    (r"connection.?(refused|reset|error)|network", "network_error",
-     "Add retry logic for transient network errors. Verify endpoint availability before requests."),
-    (r"null|none|undefined|missing.?field", "null_handling",
-     "Check for null/missing values before processing. Provide sensible defaults for optional fields."),
+    (
+        r"json\.?decode|invalid json|json parse",
+        "json_parsing",
+        "Validate JSON structure before parsing. Check for empty responses, trailing commas, and unescaped characters.",
+    ),
+    (
+        r"timeout|timed?\s*out|deadline exceeded",
+        "timeout",
+        "Add timeout handling with exponential backoff. Set explicit timeouts on all external calls.",
+    ),
+    (
+        r"rate.?limit|429|too many requests",
+        "rate_limit",
+        "Implement rate limiting with backoff. Check rate limit headers before retrying.",
+    ),
+    (
+        r"auth|unauthorized|403|401|forbidden",
+        "auth_failure",
+        "Verify credentials before making API calls. Check token expiration and refresh if needed.",
+    ),
+    (
+        r"connection.?(refused|reset|error)|network",
+        "network_error",
+        "Add retry logic for transient network errors. Verify endpoint availability before requests.",
+    ),
+    (
+        r"null|none|undefined|missing.?field",
+        "null_handling",
+        "Check for null/missing values before processing. Provide sensible defaults for optional fields.",
+    ),
 ]
 
-_compiled_known = [
-    (re.compile(p, re.IGNORECASE), name, fix)
-    for p, name, fix in KNOWN_PATTERNS
-]
+_compiled_known = [(re.compile(p, re.IGNORECASE), name, fix) for p, name, fix in KNOWN_PATTERNS]
 
 
 class TieredAnalyzer:
@@ -81,14 +96,16 @@ class TieredAnalyzer:
         for compiled, pattern_name, fix_content in _compiled_known:
             if compiled.search(text):
                 logger.info(f"Tier 1 match: {pattern_name} for trace {trace.trace_id[:8]}")
-                return [CandidateFix(
-                    fix_type=FixType.CHECKLIST,
-                    content=fix_content,
-                    applies_when=f"When the agent encounters {pattern_name.replace('_', ' ')} issues",
-                    source_trace_ids=[trace.trace_id],
-                    confidence=0.7,
-                    reasoning=f"Known pattern match: {pattern_name}",
-                )]
+                return [
+                    CandidateFix(
+                        fix_type=FixType.CHECKLIST,
+                        content=fix_content,
+                        applies_when=f"When the agent encounters {pattern_name.replace('_', ' ')} issues",
+                        source_trace_ids=[trace.trace_id],
+                        confidence=0.7,
+                        reasoning=f"Known pattern match: {pattern_name}",
+                    )
+                ]
 
         return None  # No known pattern — proceed to Tier 2
 
@@ -96,7 +113,6 @@ class TieredAnalyzer:
         """Tier 2: Full LLM analysis."""
         if self._llm_analyzer is None:
             from .llm_analyzer import LLMAnalyzer
-            self._llm_analyzer = LLMAnalyzer(
-                model=self.model, cost_tracker=self.cost_tracker
-            )
+
+            self._llm_analyzer = LLMAnalyzer(model=self.model, cost_tracker=self.cost_tracker)
         return self._llm_analyzer.analyze_single(trace)

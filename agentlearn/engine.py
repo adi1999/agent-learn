@@ -2,27 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
+import inspect
 import time
-from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import click
 
 from .analyzers.llm_analyzer import LLMAnalyzer
 from .injector.simple import SimpleInjector
+from .evaluator import BatchEvaluator
 from .models import (
     AuditReport,
     CandidateFix,
     EngineStatus,
     EvalCase,
+    EvalComparison,
+    EvalRunReport,
     InjectionResult,
     KnowledgeItem,
     KnowledgeStatus,
     LearningReport,
     Outcome,
     OutcomeStatus,
-    Trace,
 )
 from .signals.llm_judge import LLMJudge
 from .store.local_store import LocalStore
@@ -102,11 +105,13 @@ class KnowledgeManager:
             elif item.times_injected < MIN_INJECTIONS_FOR_JUDGMENT:
                 insufficient.append(item.item_id)
             elif item.effectiveness_rate < DEPRECATION_THRESHOLD:
-                declining.append({
-                    "item_id": item.item_id,
-                    "effectiveness_rate": item.effectiveness_rate,
-                    "times_injected": item.times_injected,
-                })
+                declining.append(
+                    {
+                        "item_id": item.item_id,
+                        "effectiveness_rate": item.effectiveness_rate,
+                        "times_injected": item.times_injected,
+                    }
+                )
 
         avg_eff = 0.0
         rated = [i for i in active if i.times_injected >= MIN_INJECTIONS_FOR_JUDGMENT]
@@ -150,6 +155,20 @@ class EvalManager:
 
     def count(self) -> int:
         return self._store.count_eval_cases()
+
+    def import_csv(self, path: str) -> int:
+        """Import eval cases from a CSV file. Returns count imported."""
+        cases = BatchEvaluator.import_csv(path)
+        for case in cases:
+            self._store.store_eval_case(case)
+        return len(cases)
+
+    def import_dicts(self, data: list[dict]) -> int:
+        """Import eval cases from a list of dicts. Returns count imported."""
+        cases = BatchEvaluator.import_dicts(data)
+        for case in cases:
+            self._store.store_eval_case(case)
+        return len(cases)
 
     def promote_from_traces(self, min_confidence: float = 0.85, limit: int = 20) -> int:
         """Auto-promote high-confidence successful traces to eval cases."""
@@ -215,6 +234,7 @@ class EvalManager:
             examples.append({"task": t.task_input, "output": (t.final_output or "")[:200]})
 
         import json
+
         examples_json = json.dumps(examples, indent=2)
 
         client = get_openai_client()
@@ -311,6 +331,16 @@ class EvalManager:
             return 0
 
 
+def _default_input_extractor(*args: Any, **kwargs: Any) -> str:
+    """Default: first positional arg as string, or 'task_input' kwarg."""
+    return str(args[0]) if args else str(kwargs.get("task_input", ""))
+
+
+def _default_output_extractor(result: Any) -> str:
+    """Default: str(result)."""
+    return str(result)
+
+
 class Engine:
     """Core orchestrator — ties all components together."""
 
@@ -329,12 +359,18 @@ class Engine:
         control_percentage: float = 0.0,
         learning_budget_per_day: Optional[float] = None,
         approval_callback: Optional[Callable] = None,
+        agent_runner: Optional[Callable] = None,
+        default_input_extractor: Optional[Callable[..., str]] = None,
+        default_output_extractor: Optional[Callable[..., str]] = None,
     ):
         self.model = model
         self.injection_enabled = injection_enabled
         self.control_percentage = control_percentage
         self.require_human_approval = require_human_approval
         self._approval_callback = approval_callback
+        self._agent_runner = agent_runner
+        self._default_input_extractor = default_input_extractor
+        self._default_output_extractor = default_output_extractor
 
         # Cost tracking
         self._cost_tracker = CostTracker(budget_per_day=learning_budget_per_day)
@@ -355,6 +391,13 @@ class Engine:
         self._last_injection = InjectionResult()
 
     # === Public API: Runtime ===
+
+    def set_agent_runner(self, fn: Callable) -> None:
+        """Register an agent function for use during validation.
+
+        The runner should accept (task: str, knowledge_ids: list[str]) -> str.
+        """
+        self._agent_runner = fn
 
     def get_knowledge(self, task_input: str) -> str:
         """Get relevant knowledge for a task as formatted text.
@@ -379,26 +422,73 @@ class Engine:
             logger.warning(f"get_knowledge failed: {e}")
             return ""
 
-    def trace(self, func):
+    async def get_knowledge_async(self, task_input: str) -> str:
+        """Async version of get_knowledge. Use this in async agent functions."""
+        if not self.injection_enabled:
+            return ""
+        try:
+            injection = await asyncio.to_thread(self._injector.inject, task_input, self._store)
+            self._last_injection = injection
+            return injection.system_prompt_additions
+        except Exception as e:
+            logger.warning(f"get_knowledge_async failed: {e}")
+            return ""
+
+    def trace(self, func=None, *, input_extractor=None, output_extractor=None):
         """Decorator that observes an agent function.
 
         Records traces (input, output, steps) and evaluates outcomes.
         Pure observation — doesn't modify the agent's arguments or behavior.
 
-        To inject knowledge, call engine.get_knowledge() inside your agent.
+        Supports both sync and async agent functions. Automatically detects
+        coroutine functions and returns an async wrapper.
+
+        Args:
+            func: The agent function to trace. When used as @engine.trace
+                without arguments, this is the decorated function.
+            input_extractor: Optional callable(*args, **kwargs) -> str that
+                extracts the task description from the agent's arguments.
+                Defaults to str(first_positional_arg).
+            output_extractor: Optional callable(result) -> str that extracts
+                a meaningful string from the agent's return value.
+                Defaults to str(result).
+
+        Usage:
+            @engine.trace
+            def simple_agent(task_input): ...
+
+            @engine.trace(
+                input_extractor=lambda name, **kw: name,
+                output_extractor=lambda r: json.dumps(r["template"]),
+            )
+            async def complex_agent(business_name, config=None): ...
         """
+        if func is None:
+            # Called with arguments: @engine.trace(input_extractor=..., ...)
+            return lambda f: self._make_wrapper(f, input_extractor, output_extractor)
+        # Called without arguments: @engine.trace
+        return self._make_wrapper(func, input_extractor, output_extractor)
+
+    def _make_wrapper(self, func, input_extractor, output_extractor):
+        """Dispatch to sync or async wrapper based on the decorated function."""
+        in_ext = input_extractor or self._default_input_extractor or _default_input_extractor
+        out_ext = output_extractor or self._default_output_extractor or _default_output_extractor
+
+        if inspect.iscoroutinefunction(func):
+            return self._make_async_wrapper(func, in_ext, out_ext)
+        return self._make_sync_wrapper(func, in_ext, out_ext)
+
+    def _make_sync_wrapper(self, func, in_ext, out_ext):
+        """Create a synchronous trace wrapper."""
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             import random
 
-            # Determine task_input from first positional arg
-            task_input = args[0] if args else kwargs.get("task_input", "")
+            task_input = in_ext(*args, **kwargs)
 
             # A/B control: decide if this is a control run (disable injection)
-            is_control = (
-                self.control_percentage > 0
-                and random.random() < self.control_percentage
-            )
+            is_control = self.control_percentage > 0 and random.random() < self.control_percentage
 
             _saved_injection_enabled = self.injection_enabled
             if is_control:
@@ -417,66 +507,113 @@ class Engine:
             try:
                 result = func(*args, **kwargs)
             except Exception as e:
-                from .models import Step, StepType
-
-                error_step = Step(
-                    step_type=StepType.ERROR,
-                    input_context=str(task_input),
-                    decision="Run agent function",
-                    result=str(e),
-                )
-                self._tracer.record_step(trace_id, error_step)
-                outcome = Outcome(
-                    status=OutcomeStatus.FAILURE,
-                    score=0.0,
-                    reasoning=f"Agent raised exception: {e}",
-                )
-                trace_obj = self._tracer.end_trace(trace_id, outcome, final_output="")
-                trace_obj.injected_knowledge = self._last_injection.items_injected
-                self._store.store_trace(trace_obj)
+                self._record_exception(trace_id, task_input, e)
                 self.injection_enabled = _saved_injection_enabled
                 raise
 
             # 3. Evaluate outcome
-            temp_outcome = Outcome(status=OutcomeStatus.PARTIAL, score=0.5)
-            trace_obj = self._tracer.end_trace(
-                trace_id, temp_outcome, final_output=str(result)
-            )
-
-            try:
-                outcome = self._signal.evaluate(trace_obj)
-                trace_obj.outcome = outcome
-            except Exception as e:
-                logger.warning(f"Outcome evaluation failed: {e}")
-                trace_obj.outcome = Outcome(
-                    status=OutcomeStatus.PARTIAL,
-                    score=0.5,
-                    reasoning=f"Evaluation failed: {e}",
-                )
-
-            # 4. Store trace
-            trace_obj.injected_knowledge = self._last_injection.items_injected
-            if is_control:
-                trace_obj.environment["is_control"] = True
-            self._store.store_trace(trace_obj)
-
-            # 5. Update effectiveness for injected knowledge
-            for item_id in self._last_injection.items_injected:
-                helped = trace_obj.outcome.status == OutcomeStatus.SUCCESS
-                try:
-                    self._store.update_effectiveness(item_id, helped=helped)
-                except Exception as e:
-                    logger.warning(f"Failed to update effectiveness for {item_id}: {e}")
+            final_output = out_ext(result)
+            self._finalize_trace(trace_id, final_output, is_control)
 
             self.injection_enabled = _saved_injection_enabled
             return result
 
         return wrapper
 
-    def run(self, agent_func: Callable, task: str, **kwargs) -> str:
+    def _make_async_wrapper(self, func, in_ext, out_ext):
+        """Create an async trace wrapper."""
+
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            import random
+
+            task_input = in_ext(*args, **kwargs)
+
+            is_control = self.control_percentage > 0 and random.random() < self.control_percentage
+
+            _saved_injection_enabled = self.injection_enabled
+            if is_control:
+                self.injection_enabled = False
+
+            self._last_injection = InjectionResult()
+
+            trace_id = self._tracer.start_trace(
+                task_input,
+                metadata={"is_control": is_control} if is_control else {},
+            )
+
+            try:
+                result = await func(*args, **kwargs)
+            except Exception as e:
+                await asyncio.to_thread(self._record_exception, trace_id, task_input, e)
+                self.injection_enabled = _saved_injection_enabled
+                raise
+
+            final_output = out_ext(result)
+            await asyncio.to_thread(self._finalize_trace, trace_id, final_output, is_control)
+
+            self.injection_enabled = _saved_injection_enabled
+            return result
+
+        return wrapper
+
+    def _record_exception(self, trace_id: str, task_input: str, exc: Exception) -> None:
+        """Record an exception in the trace and store it."""
+        from .models import Step, StepType
+
+        error_step = Step(
+            step_type=StepType.ERROR,
+            input_context=str(task_input),
+            decision="Run agent function",
+            result=str(exc),
+        )
+        self._tracer.record_step(trace_id, error_step)
+        outcome = Outcome(
+            status=OutcomeStatus.FAILURE,
+            score=0.0,
+            reasoning=f"Agent raised exception: {exc}",
+        )
+        trace_obj = self._tracer.end_trace(trace_id, outcome, final_output="")
+        trace_obj.injected_knowledge = self._last_injection.items_injected
+        self._store.store_trace(trace_obj)
+
+    def _finalize_trace(self, trace_id: str, final_output: str, is_control: bool) -> None:
+        """Evaluate outcome, store trace, and update effectiveness."""
+        temp_outcome = Outcome(status=OutcomeStatus.PARTIAL, score=0.5)
+        trace_obj = self._tracer.end_trace(trace_id, temp_outcome, final_output=final_output)
+
+        try:
+            outcome = self._signal.evaluate(trace_obj)
+            trace_obj.outcome = outcome
+        except Exception as e:
+            logger.warning(f"Outcome evaluation failed: {e}")
+            trace_obj.outcome = Outcome(
+                status=OutcomeStatus.PARTIAL,
+                score=0.5,
+                reasoning=f"Evaluation failed: {e}",
+            )
+
+        trace_obj.injected_knowledge = self._last_injection.items_injected
+        if is_control:
+            trace_obj.environment["is_control"] = True
+        self._store.store_trace(trace_obj)
+
+        for item_id in self._last_injection.items_injected:
+            helped = trace_obj.outcome.status == OutcomeStatus.SUCCESS
+            try:
+                self._store.update_effectiveness(item_id, helped=helped)
+            except Exception as e:
+                logger.warning(f"Failed to update effectiveness for {item_id}: {e}")
+
+    def run(self, agent_func: Callable, task: str, **kwargs) -> Any:
         """Run an agent function with automatic tracing."""
         traced = self.trace(agent_func)
         return traced(task, **kwargs)
+
+    async def run_async(self, agent_func: Callable, task: str, **kwargs) -> Any:
+        """Run an async agent function with automatic tracing."""
+        traced = self.trace(agent_func)
+        return await traced(task, **kwargs)
 
     # === Public API: Learning ===
 
@@ -549,9 +686,9 @@ class Engine:
     def _quick_win_promote(self, candidate: CandidateFix, report: LearningReport) -> None:
         """Quick-win mode: show suggestion, let human approve directly."""
         click.echo()
-        click.echo(click.style(
-            f"  Suggested fix (confidence: {candidate.confidence:.0%}):", bold=True
-        ))
+        click.echo(
+            click.style(f"  Suggested fix (confidence: {candidate.confidence:.0%}):", bold=True)
+        )
         click.echo(f"    Type: {candidate.fix_type.value}")
         click.echo(f"    Applies when: {candidate.applies_when}")
         click.echo(f"    Content: {candidate.content[:300]}")
@@ -578,14 +715,32 @@ class Engine:
         report: LearningReport,
     ) -> None:
         """Normal validation: run through validator, then promote or reject."""
-
-        def agent_runner(task: str, knowledge_ids: list[str]) -> str:
-            # Placeholder — actual agent re-running requires user's agent function
-            return ""
+        if self._agent_runner is None:
+            logger.info(
+                "No agent_runner registered — cannot run statistical validation. "
+                "Call engine.set_agent_runner(fn) to enable. Deferring to approval."
+            )
+            if self._approval_callback:
+                approved = self._approval_callback(candidate)
+                if approved:
+                    item = KnowledgeItem(
+                        fix_type=candidate.fix_type,
+                        content=candidate.content,
+                        applies_when=candidate.applies_when,
+                        source_trace_ids=candidate.source_trace_ids,
+                        status=KnowledgeStatus.ACTIVE,
+                    )
+                    self._store.store(item)
+                    report.candidates_promoted += 1
+                    return
+            report.candidates_rejected += 1
+            return
 
         try:
             result = self._validator.validate(
-                candidate, eval_set, agent_runner,
+                candidate,
+                eval_set,
+                self._agent_runner,
                 approval_callback=self._approval_callback,
             )
         except Exception as e:
@@ -605,18 +760,22 @@ class Engine:
             )
             self._store.store(item)
             report.candidates_promoted += 1
-            report.details.append({
-                "fix_id": candidate.fix_id,
-                "item_id": item.item_id,
-                "action": "promoted",
-                "improvement": result.improvement,
-            })
+            report.details.append(
+                {
+                    "fix_id": candidate.fix_id,
+                    "item_id": item.item_id,
+                    "action": "promoted",
+                    "improvement": result.improvement,
+                }
+            )
         else:
             report.candidates_rejected += 1
-            report.details.append({
-                "fix_id": candidate.fix_id,
-                "action": "rejected",
-            })
+            report.details.append(
+                {
+                    "fix_id": candidate.fix_id,
+                    "action": "rejected",
+                }
+            )
 
     # === Public API: Knowledge Management ===
 
@@ -629,6 +788,66 @@ class Engine:
     @property
     def eval(self) -> EvalManager:
         return self._eval_manager
+
+    # === Public API: Batch Evaluation ===
+
+    def evaluate(
+        self,
+        agent_func: Callable[[str], str],
+        tags: Optional[list[str]] = None,
+        name: str = "",
+        pass_threshold: float = 0.7,
+    ) -> EvalRunReport:
+        """Run batch evaluation of agent_func against the eval set.
+
+        Args:
+            agent_func: Agent function (takes task_input string, returns output string).
+            tags: Optional tag filter for eval cases.
+            name: Optional name for this eval run.
+            pass_threshold: Score >= this counts as passed.
+
+        Returns:
+            EvalRunReport with aggregate metrics and per-case results.
+        """
+        evaluator = BatchEvaluator(signal=self._signal, pass_threshold=pass_threshold)
+        cases = self._store.list_eval_cases(tags=tags)
+        if not cases:
+            logger.warning("No eval cases found. Import a dataset first.")
+            return EvalRunReport(name=name, pass_threshold=pass_threshold)
+
+        report = evaluator.run(agent_func, cases, name=name)
+        self._store.store_eval_run(report)
+        return report
+
+    async def evaluate_async(
+        self,
+        agent_func: Callable,
+        tags: Optional[list[str]] = None,
+        name: str = "",
+        pass_threshold: float = 0.7,
+    ) -> EvalRunReport:
+        """Async batch evaluation of agent_func against the eval set.
+
+        agent_func can be sync or async. Sync functions are called in a thread.
+        """
+        evaluator = BatchEvaluator(signal=self._signal, pass_threshold=pass_threshold)
+        cases = self._store.list_eval_cases(tags=tags)
+        if not cases:
+            logger.warning("No eval cases found. Import a dataset first.")
+            return EvalRunReport(name=name, pass_threshold=pass_threshold)
+
+        report = await evaluator.run_async(agent_func, cases, name=name)
+        await asyncio.to_thread(self._store.store_eval_run, report)
+        return report
+
+    def compare_eval_runs(self, baseline_id: str, treatment_id: str) -> EvalComparison:
+        """Compare two stored eval runs."""
+        baseline = self._store.get_eval_run(baseline_id)
+        treatment = self._store.get_eval_run(treatment_id)
+        if baseline is None or treatment is None:
+            missing = baseline_id if baseline is None else treatment_id
+            raise ValueError(f"Eval run not found: {missing}")
+        return BatchEvaluator.compare(baseline, treatment)
 
     # === Public API: Status ===
 
@@ -707,18 +926,22 @@ class Engine:
 
         all_traces = self._store.get_traces(limit=500)
         treatment = [
-            t.outcome.score for t in all_traces
-            if t.outcome and t.outcome.score is not None
+            t.outcome.score
+            for t in all_traces
+            if t.outcome
+            and t.outcome.score is not None
             and not t.environment.get("is_control", False)
         ]
         control = [
-            t.outcome.score for t in all_traces
-            if t.outcome and t.outcome.score is not None
-            and t.environment.get("is_control", False)
+            t.outcome.score
+            for t in all_traces
+            if t.outcome and t.outcome.score is not None and t.environment.get("is_control", False)
         ]
 
         if not treatment or not control:
-            return LiftReport(recommendation="Not enough data. Need both treatment and control traces.")
+            return LiftReport(
+                recommendation="Not enough data. Need both treatment and control traces."
+            )
 
         t_avg = sum(treatment) / len(treatment)
         c_avg = sum(control) / len(control)
@@ -766,19 +989,23 @@ class Engine:
             # Count recent failures where this item was injected
             recent_traces = self._store.get_traces(limit=20)
             recent_failures = sum(
-                1 for t in recent_traces
-                if t.outcome and t.outcome.status == OutcomeStatus.FAILURE
+                1
+                for t in recent_traces
+                if t.outcome
+                and t.outcome.status == OutcomeStatus.FAILURE
                 and item_id in t.injected_knowledge
             )
 
             if is_new or recent_failures > 5:
-                candidates.append({
-                    "item_id": item_id,
-                    "is_new": is_new,
-                    "recent_failure_rate": recent_failures / max(len(recent_traces), 1),
-                    "content_preview": item.content[:100],
-                    "effectiveness_rate": item.effectiveness_rate,
-                })
+                candidates.append(
+                    {
+                        "item_id": item_id,
+                        "is_new": is_new,
+                        "recent_failure_rate": recent_failures / max(len(recent_traces), 1),
+                        "content_preview": item.content[:100],
+                        "effectiveness_rate": item.effectiveness_rate,
+                    }
+                )
 
         recommendation = (
             "Review new items — recently promoted knowledge may be causing issues"

@@ -9,6 +9,8 @@ from typing import Optional
 
 from ..models import (
     EvalCase,
+    EvalResult,
+    EvalRunReport,
     KnowledgeItem,
     KnowledgeStatus,
     Outcome,
@@ -93,6 +95,25 @@ class LocalStore:
                     tags TEXT DEFAULT '[]',
                     source TEXT DEFAULT 'auto',
                     created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS eval_runs (
+                    run_id TEXT PRIMARY KEY,
+                    name TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    total_cases INTEGER DEFAULT 0,
+                    passed INTEGER DEFAULT 0,
+                    failed INTEGER DEFAULT 0,
+                    errored INTEGER DEFAULT 0,
+                    accuracy REAL DEFAULT 0.0,
+                    avg_score REAL DEFAULT 0.0,
+                    min_score REAL DEFAULT 0.0,
+                    max_score REAL DEFAULT 0.0,
+                    duration_seconds REAL DEFAULT 0.0,
+                    pass_threshold REAL DEFAULT 0.7,
+                    signal_source TEXT DEFAULT '',
+                    tag_stats TEXT DEFAULT '{}',
+                    results TEXT DEFAULT '[]'
                 );
 
                 CREATE TABLE IF NOT EXISTS embeddings (
@@ -357,9 +378,7 @@ class LocalStore:
     def mark_trace_analyzed(self, trace_id: str) -> None:
         """Mark a trace as analyzed."""
         with self._lock:
-            self._conn.execute(
-                "UPDATE traces SET analyzed = 1 WHERE trace_id = ?", (trace_id,)
-            )
+            self._conn.execute("UPDATE traces SET analyzed = 1 WHERE trace_id = ?", (trace_id,))
             self._conn.commit()
 
     def get_traces(
@@ -456,6 +475,64 @@ class LocalStore:
             row = self._conn.execute("SELECT COUNT(*) as cnt FROM eval_cases").fetchone()
         return row["cnt"]
 
+    # === Eval Run Storage ===
+
+    def store_eval_run(self, report: EvalRunReport) -> str:
+        """Store a batch eval run report."""
+        results_json = json.dumps([r.model_dump(mode="json") for r in report.results])
+        tag_stats_json = json.dumps(report.tag_stats)
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO eval_runs
+                   (run_id, name, created_at, total_cases, passed, failed, errored,
+                    accuracy, avg_score, min_score, max_score, duration_seconds,
+                    pass_threshold, signal_source, tag_stats, results)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    report.run_id,
+                    report.name,
+                    report.created_at.isoformat(),
+                    report.total_cases,
+                    report.passed,
+                    report.failed,
+                    report.errored,
+                    report.accuracy,
+                    report.avg_score,
+                    report.min_score,
+                    report.max_score,
+                    report.duration_seconds,
+                    report.pass_threshold,
+                    report.signal_source,
+                    tag_stats_json,
+                    results_json,
+                ),
+            )
+            self._conn.commit()
+        return report.run_id
+
+    def list_eval_runs(self, limit: int = 20) -> list[EvalRunReport]:
+        """List eval runs, most recent first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM eval_runs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_eval_run(row) for row in rows]
+
+    def get_eval_run(self, run_id: str) -> Optional[EvalRunReport]:
+        """Get a single eval run by ID (supports partial ID match)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM eval_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                row = self._conn.execute(
+                    "SELECT * FROM eval_runs WHERE run_id LIKE ?", (f"{run_id}%",)
+                ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_eval_run(row)
+
     # === Serialization Helpers ===
 
     def _row_to_knowledge(self, row: sqlite3.Row) -> KnowledgeItem:
@@ -518,4 +595,26 @@ class LocalStore:
             tags=json.loads(row["tags"]),
             source=row["source"],
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def _row_to_eval_run(self, row: sqlite3.Row) -> EvalRunReport:
+        results_data = json.loads(row["results"])
+        results = [EvalResult.model_validate(r) for r in results_data]
+        return EvalRunReport(
+            run_id=row["run_id"],
+            name=row["name"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            total_cases=row["total_cases"],
+            passed=row["passed"],
+            failed=row["failed"],
+            errored=row["errored"],
+            accuracy=row["accuracy"],
+            avg_score=row["avg_score"],
+            min_score=row["min_score"],
+            max_score=row["max_score"],
+            duration_seconds=row["duration_seconds"],
+            pass_threshold=row["pass_threshold"],
+            signal_source=row["signal_source"],
+            tag_stats=json.loads(row["tag_stats"]),
+            results=results,
         )

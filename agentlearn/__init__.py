@@ -1,6 +1,7 @@
 """agentlearn — recursive learning framework for AI agents."""
 
 from .engine import Engine
+from .evaluator import BatchEvaluator
 from .models import (
     AuditReport,
     BlameReport,
@@ -8,6 +9,9 @@ from .models import (
     EngineStatus,
     EvalCase,
     EvalCaseResult,
+    EvalComparison,
+    EvalResult,
+    EvalRunReport,
     FixType,
     InjectionResult,
     KnowledgeItem,
@@ -22,16 +26,20 @@ from .models import (
     ValidationResult,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Engine",
+    "BatchEvaluator",
     "AuditReport",
     "BlameReport",
     "CandidateFix",
     "EngineStatus",
     "EvalCase",
     "EvalCaseResult",
+    "EvalComparison",
+    "EvalResult",
+    "EvalRunReport",
     "FixType",
     "InjectionResult",
     "KnowledgeItem",

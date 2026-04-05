@@ -456,7 +456,7 @@ class TestEnginePhase3:
 
     def test_version(self):
         import agentlearn
-        assert agentlearn.__version__ == "0.3.0"
+        assert agentlearn.__version__ == "0.4.0"
 
     def test_new_models_importable(self):
         from agentlearn import BlameReport, LiftReport

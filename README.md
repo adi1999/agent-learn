@@ -44,6 +44,33 @@ Agent runs → Trace (observe) → Analyze (extract lessons) → Validate (test 
 3. **Validate** — Fixes are A/B tested before promotion. Must improve by 5%+ with zero regressions.
 4. **Inject** — `engine.get_knowledge()` returns relevant rules. You decide where to put them.
 
+## Batch evaluation
+
+Measure your agent's performance with a ground-truth dataset — before and after learning.
+
+```python
+engine = Engine(store="./knowledge")
+
+# Import a dataset (CSV or list of dicts)
+engine.eval.import_csv("eval_set.csv")
+# or: engine.eval.import_dicts([{"task_input": "2+2?", "expected_output": "4", "tags": ["math"]}])
+
+# Benchmark your agent
+baseline = engine.evaluate(my_agent, name="before-learning")
+print(f"Accuracy: {baseline.accuracy:.1%}, Avg Score: {baseline.avg_score:.3f}")
+print(f"Per-tag: {baseline.tag_stats}")
+
+# ... run engine.learn() ...
+
+# Measure improvement
+after = engine.evaluate(my_agent, name="after-learning")
+comparison = engine.compare_eval_runs(baseline.run_id, after.run_id)
+print(f"Accuracy: {comparison.accuracy_delta:+.1%}")
+print(f"Improvements: {len(comparison.improvements)}, Regressions: {len(comparison.regressions)}")
+```
+
+CSV format: `task_input` (required), `expected_output`, `tags` (comma-separated), `judge_prompt`. When `expected_output` is provided, scoring is deterministic (exact match = 1.0, fuzzy = 0.8). Otherwise, the configured `OutcomeSignal` (LLM judge, composite, etc.) is used.
+
 ## What the agent learns
 
 Knowledge items are readable instructions, not opaque weights:
@@ -59,15 +86,51 @@ You can inspect, edit, approve, or reject any of them. When you swap models, the
 ```bash
 agentlearn status                          # Learning progress overview
 agentlearn learn                           # Trigger a learning cycle
+
+# Knowledge management
 agentlearn knowledge list                  # List knowledge items
 agentlearn knowledge show <id>             # Show details
 agentlearn knowledge approve <id>          # Promote candidate to active
 agentlearn knowledge audit                 # Check knowledge health
+
+# Traces
 agentlearn traces list --status failure    # List failed traces
 agentlearn traces search "timeout"         # Full-text search across traces
 agentlearn traces blame <id>              # Find which knowledge caused a failure
+
+# Evaluation
+agentlearn eval import eval_set.csv        # Import eval cases from CSV
+agentlearn eval run --agent myapp:agent    # Run batch evaluation
+agentlearn eval history                    # List past eval runs
+agentlearn eval compare <id1> <id2>        # Compare two eval runs
+
+# Other
 agentlearn snapshot create --tag v1        # Version your knowledge store
 agentlearn ab-report                       # A/B control group performance
+```
+
+## Plugin system
+
+All components are swappable via Python Protocols:
+
+| Component | Default | Alternatives |
+|-----------|---------|-------------|
+| **Tracer** | GenericLLMTracer | — |
+| **Analyzer** | LLMAnalyzer | BatchAnalyzer, TieredAnalyzer |
+| **Validator** | HumanInLoopValidator | StatisticalValidator |
+| **OutcomeSignal** | LLMJudge | CompositeSignal, DeterministicSignal |
+| **Injector** | SimpleInjector | EmbeddingInjector, HybridInjector |
+| **KnowledgeStore** | LocalStore (SQLite) | — |
+
+```python
+from agentlearn import Engine
+from agentlearn.signals.composite import CompositeSignal
+from agentlearn.validators.statistical import StatisticalValidator
+
+engine = Engine(
+    signal=CompositeSignal(),
+    validator=StatisticalValidator(),
+)
 ```
 
 ## Install

@@ -40,6 +40,151 @@ def _inject_knowledge_into_messages(messages: list[dict], knowledge: str) -> lis
     return messages
 
 
+class _OpenAIStreamWrapper:
+    """Wraps an OpenAI streaming response to buffer content while yielding chunks."""
+
+    def __init__(self, stream, tracer, trace_id: str, model: str, messages, start_time: float):
+        self._stream = stream
+        self._tracer = tracer
+        self._trace_id = trace_id
+        self._model = model
+        self._messages = messages
+        self._start_time = start_time
+        self._content_parts: list[str] = []
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            chunk = next(self._stream)
+        except StopIteration:
+            self._record_step()
+            raise
+
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                self._content_parts.append(delta.content)
+
+        if chunk.usage:
+            self._prompt_tokens = chunk.usage.prompt_tokens or 0
+            self._completion_tokens = chunk.usage.completion_tokens or 0
+
+        return chunk
+
+    def __enter__(self):
+        if hasattr(self._stream, "__enter__"):
+            self._stream.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        self._record_step()
+        if hasattr(self._stream, "__exit__"):
+            return self._stream.__exit__(*args)
+        return False
+
+    def _record_step(self):
+        content = "".join(self._content_parts)
+        if not content and not self._content_parts:
+            return  # Nothing to record
+        latency = time.time() - self._start_time
+        cost = estimate_cost(self._model, self._prompt_tokens, self._completion_tokens)
+        step = Step(
+            step_type=StepType.LLM_CALL,
+            input_context=str(self._messages[-1] if self._messages else ""),
+            decision=f"Call {self._model} (streamed)",
+            result=content,
+            metadata={
+                "model": self._model,
+                "input_tokens": self._prompt_tokens,
+                "output_tokens": self._completion_tokens,
+                "latency_seconds": round(latency, 3),
+                "cost_usd": cost,
+                "streamed": True,
+            },
+        )
+        self._tracer.record_step(self._trace_id, step)
+        self._content_parts = []  # Prevent double-recording
+
+
+class _AnthropicStreamWrapper:
+    """Wraps an Anthropic streaming response to buffer content while yielding events."""
+
+    def __init__(self, stream, tracer, trace_id: str, model: str, messages, start_time: float):
+        self._stream = stream
+        self._tracer = tracer
+        self._trace_id = trace_id
+        self._model = model
+        self._messages = messages
+        self._start_time = start_time
+        self._content_parts: list[str] = []
+        self._input_tokens = 0
+        self._output_tokens = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            event = next(self._stream)
+        except StopIteration:
+            self._record_step()
+            raise
+
+        event_type = getattr(event, "type", "")
+        if event_type == "content_block_delta":
+            delta = getattr(event, "delta", None)
+            if delta and getattr(delta, "text", None):
+                self._content_parts.append(delta.text)
+        elif event_type == "message_start":
+            msg = getattr(event, "message", None)
+            if msg and hasattr(msg, "usage"):
+                self._input_tokens = getattr(msg.usage, "input_tokens", 0)
+        elif event_type == "message_delta":
+            usage = getattr(event, "usage", None)
+            if usage:
+                self._output_tokens = getattr(usage, "output_tokens", 0)
+
+        return event
+
+    def __enter__(self):
+        if hasattr(self._stream, "__enter__"):
+            self._stream.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        self._record_step()
+        if hasattr(self._stream, "__exit__"):
+            return self._stream.__exit__(*args)
+        return False
+
+    def _record_step(self):
+        content = "".join(self._content_parts)
+        if not content and not self._content_parts:
+            return
+        latency = time.time() - self._start_time
+        cost = estimate_cost(self._model, self._input_tokens, self._output_tokens)
+        step = Step(
+            step_type=StepType.LLM_CALL,
+            input_context=str(self._messages[-1] if self._messages else ""),
+            decision=f"Call {self._model} (streamed)",
+            result=content,
+            metadata={
+                "model": self._model,
+                "input_tokens": self._input_tokens,
+                "output_tokens": self._output_tokens,
+                "latency_seconds": round(latency, 3),
+                "cost_usd": cost,
+                "streamed": True,
+            },
+        )
+        self._tracer.record_step(self._trace_id, step)
+        self._content_parts = []
+
+
 class GenericLLMTracer:
     """Tracer that wraps OpenAI and Anthropic SDK calls to auto-record steps."""
 
@@ -75,9 +220,7 @@ class GenericLLMTracer:
 
         trace.outcome = outcome
         trace.final_output = final_output
-        trace.cost_usd = sum(
-            s.metadata.get("cost_usd", 0.0) for s in trace.steps
-        )
+        trace.cost_usd = sum(s.metadata.get("cost_usd", 0.0) for s in trace.steps)
 
         # Clear context var if it matches
         if _active_trace_id.get() == trace_id:
@@ -104,11 +247,6 @@ class GenericLLMTracer:
             if trace_id is None:
                 return original_create(*args, **kwargs)
 
-            # Check for streaming
-            if kwargs.get("stream", False):
-                logger.warning("Streaming not supported for tracing in Phase 1. Recording skipped.")
-                return original_create(*args, **kwargs)
-
             # Auto-inject: prepend knowledge to system message if available
             knowledge = _pending_knowledge.get("")
             if knowledge:
@@ -119,9 +257,14 @@ class GenericLLMTracer:
                 if args:
                     args = (messages, *args[1:])
 
-            start_time = time.time()
             messages = kwargs.get("messages", args[0] if args else [])
             model = kwargs.get("model", "unknown")
+            start_time = time.time()
+
+            # Streaming: buffer content while passing chunks through
+            if kwargs.get("stream", False):
+                stream = original_create(*args, **kwargs)
+                return _OpenAIStreamWrapper(stream, tracer, trace_id, model, messages, start_time)
 
             try:
                 response = original_create(*args, **kwargs)
@@ -178,10 +321,6 @@ class GenericLLMTracer:
             if trace_id is None:
                 return original_create(*args, **kwargs)
 
-            if kwargs.get("stream", False):
-                logger.warning("Streaming not supported for tracing in Phase 1. Recording skipped.")
-                return original_create(*args, **kwargs)
-
             # Auto-inject: prepend knowledge to system param for Anthropic
             knowledge = _pending_knowledge.get("")
             if knowledge:
@@ -192,9 +331,16 @@ class GenericLLMTracer:
                 else:
                     kwargs["system"] = knowledge
 
-            start_time = time.time()
             messages = kwargs.get("messages", [])
             model = kwargs.get("model", "unknown")
+            start_time = time.time()
+
+            # Streaming: buffer content while passing events through
+            if kwargs.get("stream", False):
+                stream = original_create(*args, **kwargs)
+                return _AnthropicStreamWrapper(
+                    stream, tracer, trace_id, model, messages, start_time
+                )
 
             try:
                 response = original_create(*args, **kwargs)
@@ -219,7 +365,11 @@ class GenericLLMTracer:
 
             content = ""
             if response.content:
-                content = response.content[0].text if response.content[0].type == "text" else str(response.content[0])
+                content = (
+                    response.content[0].text
+                    if response.content[0].type == "text"
+                    else str(response.content[0])
+                )
 
             step = Step(
                 step_type=StepType.LLM_CALL,

@@ -70,9 +70,7 @@ class CostTracker:
         """Return a cost breakdown."""
         return {
             "total_cost_usd": round(self.total_cost, 6),
-            "budget_remaining": round(self.budget - self.total_cost, 6)
-            if self.budget
-            else None,
+            "budget_remaining": round(self.budget - self.total_cost, 6) if self.budget else None,
             "by_component": {k: round(v, 6) for k, v in self.costs_by_component.items() if v > 0},
         }
 

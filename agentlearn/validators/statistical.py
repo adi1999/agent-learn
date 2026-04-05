@@ -155,18 +155,18 @@ class StatisticalValidator:
             treatment_scores.append(treatment_score)
 
             passed = treatment_score >= baseline_score
-            details.append(EvalCaseResult(
-                task_input=case.task_input,
-                baseline_score=baseline_score,
-                treatment_score=treatment_score,
-                passed=passed,
-            ))
+            details.append(
+                EvalCaseResult(
+                    task_input=case.task_input,
+                    baseline_score=baseline_score,
+                    treatment_score=treatment_score,
+                    passed=passed,
+                )
+            )
 
         # Compute statistics
         improvement = _mean(treatment_scores) - _mean(baseline_scores)
-        regressions = sum(
-            1 for t, b in zip(treatment_scores, baseline_scores) if t < b
-        )
+        regressions = sum(1 for t, b in zip(treatment_scores, baseline_scores) if t < b)
         confidence = _welchs_t_test(baseline_scores, treatment_scores)
 
         passed = (
@@ -191,27 +191,9 @@ class StatisticalValidator:
 
     def _score_output(self, output: str, case: EvalCase) -> float:
         """Score an output against an eval case."""
-        if case.expected_output is not None:
-            # Deterministic: exact or fuzzy match
-            if output.strip() == case.expected_output.strip():
-                return 1.0
-            # Fuzzy: check if expected is contained in output
-            if case.expected_output.strip().lower() in output.strip().lower():
-                return 0.8
-            return 0.0
+        from ..utils.scoring import score_output
 
-        if self._signal is not None:
-            # Use the outcome signal to score
-            from ..models import Trace
-            trace = Trace(
-                task_input=case.task_input,
-                final_output=output,
-            )
-            outcome = self._signal.evaluate(trace)
-            return outcome.score if outcome.score is not None else 0.5
-
-        # No expected output and no signal — can't score
-        return 0.5
+        return score_output(output, case, signal=self._signal)
 
     def _defer_to_human(
         self,

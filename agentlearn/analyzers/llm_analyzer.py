@@ -136,7 +136,9 @@ class LLMAnalyzer:
                 if len(step_data.get("result", "")) > 500:
                     step_data["result"] = step_data["result"][:500] + "... [truncated]"
                 if len(step_data.get("input_context", "")) > 500:
-                    step_data["input_context"] = step_data["input_context"][:500] + "... [truncated]"
+                    step_data["input_context"] = (
+                        step_data["input_context"][:500] + "... [truncated]"
+                    )
             result = json.dumps(data, indent=2, default=str)
 
         return result

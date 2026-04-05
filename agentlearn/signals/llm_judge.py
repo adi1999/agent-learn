@@ -135,9 +135,7 @@ class LLMJudge:
             logger.error(f"Proposer failed: {e}")
             return None
 
-    def _judge(
-        self, client, task_input: str, output: str, criteria: list[dict]
-    ) -> Optional[dict]:
+    def _judge(self, client, task_input: str, output: str, criteria: list[dict]) -> Optional[dict]:
         """Step 2: Score output against criteria."""
         import json
 

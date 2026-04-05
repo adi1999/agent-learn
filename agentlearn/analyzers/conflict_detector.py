@@ -68,9 +68,7 @@ class ConflictDetector:
         self.use_llm = use_llm
         self.model = model
 
-    def check_conflicts(
-        self, new_item: KnowledgeItem, store
-    ) -> list[Conflict]:
+    def check_conflicts(self, new_item: KnowledgeItem, store) -> list[Conflict]:
         """Check if new_item conflicts with any active knowledge."""
         active_items = store.list_all(status="active")
         if not active_items:
@@ -105,12 +103,14 @@ class ConflictDetector:
                     conflicts.append(conflict)
             else:
                 # Without LLM, flag all high-similarity pairs for manual review
-                conflicts.append(Conflict(
-                    new_item_id=new_item.item_id,
-                    existing_item_id=existing.item_id,
-                    trigger_similarity=similarity,
-                    reason=f"High trigger similarity ({similarity:.0%}) — manual review needed",
-                ))
+                conflicts.append(
+                    Conflict(
+                        new_item_id=new_item.item_id,
+                        existing_item_id=existing.item_id,
+                        trigger_similarity=similarity,
+                        reason=f"High trigger similarity ({similarity:.0%}) — manual review needed",
+                    )
+                )
 
         return conflicts
 
@@ -145,12 +145,14 @@ class ConflictDetector:
                     if conflict:
                         conflicts.append(conflict)
                 else:
-                    conflicts.append(Conflict(
-                        new_item_id=item_a.item_id,
-                        existing_item_id=item_b.item_id,
-                        trigger_similarity=similarity,
-                        reason=f"High trigger similarity ({similarity:.0%})",
-                    ))
+                    conflicts.append(
+                        Conflict(
+                            new_item_id=item_a.item_id,
+                            existing_item_id=item_b.item_id,
+                            trigger_similarity=similarity,
+                            reason=f"High trigger similarity ({similarity:.0%})",
+                        )
+                    )
 
         return conflicts
 

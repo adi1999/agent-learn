@@ -148,9 +148,7 @@ class BatchPatternAnalyzer:
 
     def _analyze_cluster(self, traces: list[Trace]) -> list[CandidateFix]:
         """Send a cluster of traces to LLM for cross-trace pattern analysis."""
-        success_count = sum(
-            1 for t in traces if t.outcome and t.outcome.status.value == "success"
-        )
+        success_count = sum(1 for t in traces if t.outcome and t.outcome.status.value == "success")
         failure_count = len(traces) - success_count
 
         # Build compact trace summaries
@@ -214,7 +212,11 @@ class BatchPatternAnalyzer:
                 valid_ids = {t.trace_id for t in traces}
                 affected_ids = [tid for tid in affected_ids if tid in valid_ids]
                 if not affected_ids:
-                    affected_ids = [t.trace_id for t in traces if t.outcome and t.outcome.status.value != "success"]
+                    affected_ids = [
+                        t.trace_id
+                        for t in traces
+                        if t.outcome and t.outcome.status.value != "success"
+                    ]
 
                 candidate = CandidateFix(
                     fix_type=fix_type,

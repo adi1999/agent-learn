@@ -157,6 +157,67 @@ class EvalCase(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+# === Batch Evaluation Models ===
+
+
+class EvalResult(BaseModel):
+    """Result of evaluating a single case in a batch run."""
+
+    eval_id: str
+    task_input: str
+    expected_output: Optional[str] = None
+    agent_output: str = ""
+    score: float = 0.0
+    passed: bool = False
+    tags: list[str] = Field(default_factory=list)
+    duration_seconds: float = 0.0
+    error: Optional[str] = None
+
+
+class EvalRunReport(BaseModel):
+    """Aggregate results from a batch evaluation run."""
+
+    run_id: str = Field(default_factory=_new_id)
+    name: str = ""
+    created_at: datetime = Field(default_factory=_utcnow)
+
+    # Aggregate metrics
+    total_cases: int = 0
+    passed: int = 0
+    failed: int = 0
+    errored: int = 0
+    accuracy: float = 0.0
+    avg_score: float = 0.0
+    min_score: float = 0.0
+    max_score: float = 0.0
+    duration_seconds: float = 0.0
+
+    # Per-tag breakdown: {"tag": {"total": N, "passed": N, "accuracy": F, "avg_score": F}}
+    tag_stats: dict[str, dict] = Field(default_factory=dict)
+
+    # Individual results
+    results: list[EvalResult] = Field(default_factory=list)
+
+    # Config
+    pass_threshold: float = 0.7
+    signal_source: str = ""
+
+
+class EvalComparison(BaseModel):
+    """Comparison between two eval runs."""
+
+    baseline_run_id: str
+    treatment_run_id: str
+    baseline_accuracy: float = 0.0
+    treatment_accuracy: float = 0.0
+    accuracy_delta: float = 0.0
+    baseline_avg_score: float = 0.0
+    treatment_avg_score: float = 0.0
+    score_delta: float = 0.0
+    regressions: list[dict] = Field(default_factory=list)
+    improvements: list[dict] = Field(default_factory=list)
+
+
 # === Report Models ===
 
 

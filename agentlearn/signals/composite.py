@@ -114,10 +114,7 @@ class CompositeSignal:
 
     def _should_calibrate(self) -> bool:
         """Check if we should request human calibration."""
-        return (
-            self.calibration_interval > 0
-            and self._run_count % self.calibration_interval == 0
-        )
+        return self.calibration_interval > 0 and self._run_count % self.calibration_interval == 0
 
     def get_flagged_traces(self) -> list[str]:
         """Get trace IDs flagged for human review."""

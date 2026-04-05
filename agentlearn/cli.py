@@ -15,7 +15,9 @@ def _get_engine(store: str) -> Engine:
 
 
 @click.group()
-@click.option("--store", default="./knowledge", envvar="AGENTLEARN_STORE", help="Knowledge store path")
+@click.option(
+    "--store", default="./knowledge", envvar="AGENTLEARN_STORE", help="Knowledge store path"
+)
 @click.pass_context
 def cli(ctx, store):
     """agentlearn — recursive learning framework for AI agents."""
@@ -35,12 +37,16 @@ def status(ctx):
 
     click.echo()
     click.echo(click.style("  Learning Progress", bold=True))
-    click.echo(f"    Knowledge store: {s.knowledge_total} items "
-               f"({s.knowledge_active} active, {s.knowledge_candidate} candidate, "
-               f"{s.knowledge_deprecated} deprecated)")
-    click.echo(f"    Traces collected: {s.traces_total} "
-               f"({s.traces_success} success, {s.traces_failure} failure, "
-               f"{s.traces_partial} partial)")
+    click.echo(
+        f"    Knowledge store: {s.knowledge_total} items "
+        f"({s.knowledge_active} active, {s.knowledge_candidate} candidate, "
+        f"{s.knowledge_deprecated} deprecated)"
+    )
+    click.echo(
+        f"    Traces collected: {s.traces_total} "
+        f"({s.traces_success} success, {s.traces_failure} failure, "
+        f"{s.traces_partial} partial)"
+    )
     click.echo(f"    Eval set: {s.eval_cases} cases")
     click.echo(f"    Unanalyzed traces: {s.traces_unanalyzed}")
 
@@ -48,8 +54,10 @@ def status(ctx):
         click.echo()
         click.echo(click.style("  Improvement", bold=True))
         click.echo(f"    Baseline accuracy (first 10 runs): {s.baseline_accuracy:.0%}")
-        click.echo(f"    Current accuracy (last 10 runs):   {s.current_accuracy:.0%}  "
-                   f"({s.improvement:+.0%})")
+        click.echo(
+            f"    Current accuracy (last 10 runs):   {s.current_accuracy:.0%}  "
+            f"({s.improvement:+.0%})"
+        )
 
     if s.avg_effectiveness > 0:
         click.echo(f"    Avg knowledge effectiveness: {s.avg_effectiveness:.0%}")
@@ -155,7 +163,11 @@ def knowledge_show(ctx, item_id):
     click.echo(f"  Source traces: {', '.join(match.source_trace_ids[:5])}")
     click.echo(f"  Times injected: {match.times_injected}")
     click.echo(f"  Times helped: {match.times_helped}")
-    click.echo(f"  Effectiveness: {match.effectiveness_rate:.0%}" if match.times_injected > 0 else "  Effectiveness: n/a")
+    click.echo(
+        f"  Effectiveness: {match.effectiveness_rate:.0%}"
+        if match.times_injected > 0
+        else "  Effectiveness: n/a"
+    )
     if match.validation_improvement is not None:
         click.echo(f"  Validation improvement: {match.validation_improvement:+.2f}")
     click.echo()
@@ -241,14 +253,20 @@ def knowledge_audit(ctx):
     click.echo()
     click.echo(click.style("  Knowledge Audit", bold=True))
     click.echo(f"    Active items: {report.total_active}")
-    click.echo(f"    Avg effectiveness: {report.avg_effectiveness:.0%}" if report.avg_effectiveness > 0 else "    Avg effectiveness: n/a")
+    click.echo(
+        f"    Avg effectiveness: {report.avg_effectiveness:.0%}"
+        if report.avg_effectiveness > 0
+        else "    Avg effectiveness: n/a"
+    )
 
     if report.declining_effectiveness:
         click.echo()
         click.echo(click.style("    Declining effectiveness:", fg="red"))
         for d in report.declining_effectiveness:
-            click.echo(f"      {d['item_id'][:8]}: {d['effectiveness_rate']:.0%} "
-                       f"({d['times_injected']} injections)")
+            click.echo(
+                f"      {d['item_id'][:8]}: {d['effectiveness_rate']:.0%} "
+                f"({d['times_injected']} injections)"
+            )
 
     if report.never_injected:
         click.echo()
@@ -258,7 +276,9 @@ def knowledge_audit(ctx):
 
     if report.insufficient_data:
         click.echo()
-        click.echo(f"    Insufficient data: {len(report.insufficient_data)} items (< 10 injections)")
+        click.echo(
+            f"    Insufficient data: {len(report.insufficient_data)} items (< 10 injections)"
+        )
 
     click.echo()
 
@@ -345,7 +365,9 @@ def traces_show(ctx, trace_id):
     click.echo(f"  Agent: {match.agent_id}")
     click.echo(f"  Created: {match.created_at.isoformat()}")
     click.echo(f"  Status: {match.outcome.status.value if match.outcome else 'unknown'}")
-    click.echo(f"  Score: {match.outcome.score if match.outcome and match.outcome.score is not None else 'n/a'}")
+    click.echo(
+        f"  Score: {match.outcome.score if match.outcome and match.outcome.score is not None else 'n/a'}"
+    )
     click.echo(f"  Cost: ${match.cost_usd:.4f}")
     click.echo(f"  Analyzed: {match.analyzed}")
     click.echo()
@@ -413,7 +435,13 @@ def eval_add(ctx, task, expected):
 
 
 @eval_group.command("generate")
-@click.option("--from-traces", "from_traces", default=20, type=int, help="Max eval cases to generate from traces")
+@click.option(
+    "--from-traces",
+    "from_traces",
+    default=20,
+    type=int,
+    help="Max eval cases to generate from traces",
+)
 @click.option("--min-confidence", default=0.85, type=float, help="Min outcome score for promotion")
 @click.pass_context
 def eval_generate(ctx, from_traces, min_confidence):
@@ -445,6 +473,140 @@ def eval_from_failures(ctx, pattern, count):
     engine = _get_engine(ctx.obj["store"])
     generated = engine.eval.generate_from_failures(failure_pattern=pattern, num_cases=count)
     click.echo(f"  Generated {generated} failure-targeted eval cases.")
+
+
+@eval_group.command("import")
+@click.argument("csv_path", type=click.Path(exists=True))
+@click.pass_context
+def eval_import(ctx, csv_path):
+    """Import eval cases from a CSV file."""
+    engine = _get_engine(ctx.obj["store"])
+    count = engine.eval.import_csv(csv_path)
+    click.echo(f"  Imported {count} eval cases from {csv_path}.")
+
+
+@eval_group.command("run")
+@click.option(
+    "--agent", required=True, help="Python path to agent function (module.path:func_name)"
+)
+@click.option("--tags", default=None, help="Comma-separated tag filter")
+@click.option("--name", default="", help="Name for this eval run")
+@click.option("--threshold", default=0.7, type=float, help="Pass threshold (0.0-1.0)")
+@click.pass_context
+def eval_run(ctx, agent, tags, name, threshold):
+    """Run batch evaluation against the eval set."""
+    import importlib
+
+    # Parse module:function
+    if ":" not in agent:
+        click.echo("  Error: --agent must be in format 'module.path:function_name'", err=True)
+        return
+
+    module_path, func_name = agent.rsplit(":", 1)
+    try:
+        mod = importlib.import_module(module_path)
+        agent_func = getattr(mod, func_name)
+    except (ImportError, AttributeError) as e:
+        click.echo(f"  Error loading agent: {e}", err=True)
+        return
+
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    engine = _get_engine(ctx.obj["store"])
+    report = engine.evaluate(agent_func, tags=tag_list, name=name, pass_threshold=threshold)
+
+    click.echo()
+    click.echo(f"  Eval Run: {report.run_id[:8]}" + (f" ({report.name})" if report.name else ""))
+    click.echo(f"  {'─' * 50}")
+    click.echo(
+        f"  Total: {report.total_cases}  Passed: {report.passed}  "
+        f"Failed: {report.failed}  Errored: {report.errored}"
+    )
+    click.echo(
+        f"  Accuracy: {report.accuracy:.1%}  Avg Score: {report.avg_score:.3f}  "
+        f"Duration: {report.duration_seconds:.1f}s"
+    )
+
+    if report.tag_stats:
+        click.echo()
+        click.echo(f"  {'Tag':<20} {'Total':<8} {'Passed':<8} {'Accuracy':<10} {'Avg Score'}")
+        click.echo(f"  {'─' * 20} {'─' * 8} {'─' * 8} {'─' * 10} {'─' * 10}")
+        for tag, stats in report.tag_stats.items():
+            click.echo(
+                f"  {tag:<20} {stats['total']:<8} {stats['passed']:<8} "
+                f"{stats['accuracy']:<10.1%} {stats['avg_score']:.3f}"
+            )
+    click.echo()
+
+
+@eval_group.command("history")
+@click.option("--limit", default=10, type=int, help="Max runs to show")
+@click.pass_context
+def eval_history(ctx, limit):
+    """List past eval runs."""
+    engine = _get_engine(ctx.obj["store"])
+    runs = engine._store.list_eval_runs(limit=limit)
+
+    if not runs:
+        click.echo("  No eval runs found.")
+        return
+
+    click.echo()
+    click.echo(
+        f"  {'ID':<10} {'Name':<20} {'Cases':<8} {'Accuracy':<10} {'Avg Score':<10} {'Date'}"
+    )
+    click.echo(f"  {'─' * 10} {'─' * 20} {'─' * 8} {'─' * 10} {'─' * 10} {'─' * 20}")
+    for run in runs:
+        name_preview = (run.name or "unnamed")[:18]
+        date_str = run.created_at.strftime("%Y-%m-%d %H:%M")
+        click.echo(
+            f"  {run.run_id[:8]:<10} {name_preview:<20} {run.total_cases:<8} "
+            f"{run.accuracy:<10.1%} {run.avg_score:<10.3f} {date_str}"
+        )
+    click.echo()
+
+
+@eval_group.command("compare")
+@click.argument("baseline_id")
+@click.argument("treatment_id")
+@click.pass_context
+def eval_compare(ctx, baseline_id, treatment_id):
+    """Compare two eval runs."""
+    engine = _get_engine(ctx.obj["store"])
+    try:
+        comp = engine.compare_eval_runs(baseline_id, treatment_id)
+    except ValueError as e:
+        click.echo(f"  Error: {e}", err=True)
+        return
+
+    click.echo()
+    click.echo(f"  Comparison: {comp.baseline_run_id[:8]} → {comp.treatment_run_id[:8]}")
+    click.echo(f"  {'─' * 50}")
+    click.echo(
+        f"  Accuracy:  {comp.baseline_accuracy:.1%} → {comp.treatment_accuracy:.1%}  "
+        f"({comp.accuracy_delta:+.1%})"
+    )
+    click.echo(
+        f"  Avg Score: {comp.baseline_avg_score:.3f} → {comp.treatment_avg_score:.3f}  "
+        f"({comp.score_delta:+.3f})"
+    )
+    click.echo(f"  Improvements: {len(comp.improvements)}  Regressions: {len(comp.regressions)}")
+
+    if comp.regressions:
+        click.echo()
+        click.echo("  Regressions:")
+        for r in comp.regressions[:5]:
+            click.echo(
+                f"    {r['task_input'][:60]}  ({r['baseline_score']:.2f} → {r['treatment_score']:.2f})"
+            )
+
+    if comp.improvements:
+        click.echo()
+        click.echo("  Improvements:")
+        for i in comp.improvements[:5]:
+            click.echo(
+                f"    {i['task_input'][:60]}  ({i['baseline_score']:.2f} → {i['treatment_score']:.2f})"
+            )
+    click.echo()
 
 
 # === Traces Search (FTS5) ===
@@ -493,6 +655,7 @@ def snapshot_create(ctx, tag):
     """Create a snapshot of the current knowledge store."""
     engine = _get_engine(ctx.obj["store"])
     from .store.snapshots import SnapshotManager
+
     mgr = SnapshotManager(engine._store)
     snap_id = mgr.snapshot(tag=tag)
     click.echo(f"  Created snapshot: {snap_id}" + (f" (tag: {tag})" if tag else ""))
@@ -504,6 +667,7 @@ def snapshot_list(ctx):
     """List all snapshots."""
     engine = _get_engine(ctx.obj["store"])
     from .store.snapshots import SnapshotManager
+
     mgr = SnapshotManager(engine._store)
     snaps = mgr.list_snapshots()
 
@@ -526,9 +690,12 @@ def snapshot_restore(ctx, snapshot_id):
     """Restore knowledge store from a snapshot."""
     engine = _get_engine(ctx.obj["store"])
     from .store.snapshots import SnapshotManager
+
     mgr = SnapshotManager(engine._store)
 
-    if not click.confirm(f"  Restore snapshot '{snapshot_id}'? This replaces all current knowledge."):
+    if not click.confirm(
+        f"  Restore snapshot '{snapshot_id}'? This replaces all current knowledge."
+    ):
         click.echo("  Cancelled.")
         return
 
@@ -553,9 +720,16 @@ def ab_report(ctx):
         click.echo()
         return
 
-    click.echo(f"    Treatment (with knowledge): {report.treatment_avg:.1%} avg score ({report.treatment_count} runs)")
-    click.echo(f"    Control (without knowledge): {report.control_avg:.1%} avg score ({report.control_count} runs)")
-    click.echo(f"    Lift: {report.lift:+.1%}" + (" (significant)" if report.significant else " (not significant)"))
+    click.echo(
+        f"    Treatment (with knowledge): {report.treatment_avg:.1%} avg score ({report.treatment_count} runs)"
+    )
+    click.echo(
+        f"    Control (without knowledge): {report.control_avg:.1%} avg score ({report.control_count} runs)"
+    )
+    click.echo(
+        f"    Lift: {report.lift:+.1%}"
+        + (" (significant)" if report.significant else " (not significant)")
+    )
     click.echo(f"    {report.recommendation}")
     click.echo()
 
@@ -591,7 +765,9 @@ def traces_blame(ctx, trace_id):
         click.echo()
         for c in report.candidates:
             new_tag = " [NEW]" if c.get("is_new") else ""
-            click.echo(f"    {c['item_id'][:8]}{new_tag} — failure rate: {c['recent_failure_rate']:.0%}")
+            click.echo(
+                f"    {c['item_id'][:8]}{new_tag} — failure rate: {c['recent_failure_rate']:.0%}"
+            )
             click.echo(f"      {c['content_preview']}")
     click.echo()
 

@@ -51,40 +51,51 @@ def store(tmp_path):
 
 class TestFTS5Search:
     def test_search_finds_matching_traces(self, store):
-        store.store_trace(Trace(
-            task_input="Calculate compound interest on $1000",
-            final_output="$1157.63",
-            outcome=Outcome(status=OutcomeStatus.SUCCESS, score=0.9),
-        ))
-        store.store_trace(Trace(
-            task_input="Convert USD to EUR",
-            final_output="85 EUR",
-            outcome=Outcome(status=OutcomeStatus.SUCCESS, score=0.8),
-        ))
+        store.store_trace(
+            Trace(
+                task_input="Calculate compound interest on $1000",
+                final_output="$1157.63",
+                outcome=Outcome(status=OutcomeStatus.SUCCESS, score=0.9),
+            )
+        )
+        store.store_trace(
+            Trace(
+                task_input="Convert USD to EUR",
+                final_output="85 EUR",
+                outcome=Outcome(status=OutcomeStatus.SUCCESS, score=0.8),
+            )
+        )
 
         results = store.search_traces("compound interest")
         assert len(results) == 1
         assert "compound" in results[0].task_input.lower()
 
     def test_search_no_results(self, store):
-        store.store_trace(Trace(
-            task_input="Hello world",
-            outcome=Outcome(status=OutcomeStatus.SUCCESS),
-        ))
+        store.store_trace(
+            Trace(
+                task_input="Hello world",
+                outcome=Outcome(status=OutcomeStatus.SUCCESS),
+            )
+        )
         results = store.search_traces("nonexistent query xyz")
         assert len(results) == 0
 
     def test_search_multiple_matches(self, store):
         for i in range(5):
-            store.store_trace(Trace(
-                task_input=f"Parse JSON payload variant {i}",
-                outcome=Outcome(status=OutcomeStatus.FAILURE, score=0.2,
-                                reasoning="Invalid JSON format"),
-            ))
-        store.store_trace(Trace(
-            task_input="Unrelated task",
-            outcome=Outcome(status=OutcomeStatus.SUCCESS),
-        ))
+            store.store_trace(
+                Trace(
+                    task_input=f"Parse JSON payload variant {i}",
+                    outcome=Outcome(
+                        status=OutcomeStatus.FAILURE, score=0.2, reasoning="Invalid JSON format"
+                    ),
+                )
+            )
+        store.store_trace(
+            Trace(
+                task_input="Unrelated task",
+                outcome=Outcome(status=OutcomeStatus.SUCCESS),
+            )
+        )
 
         results = store.search_traces("JSON")
         assert len(results) == 5
@@ -141,7 +152,12 @@ class TestDeterministicChecks:
             task_input="test",
             steps=[
                 Step(step_type=StepType.LLM_CALL, input_context="", decision="", result="ok"),
-                Step(step_type=StepType.ERROR, input_context="", decision="", result="Connection timeout"),
+                Step(
+                    step_type=StepType.ERROR,
+                    input_context="",
+                    decision="",
+                    result="Connection timeout",
+                ),
             ],
         )
         result = check.run(trace)
@@ -163,7 +179,7 @@ class TestDeterministicChecks:
         check = CodeExecutionCheck()
         trace = Trace(
             task_input="test",
-            final_output='```python\ndef foo():\n    return 42\n```',
+            final_output="```python\ndef foo():\n    return 42\n```",
         )
         result = check.run(trace)
         assert result.passed
@@ -172,7 +188,7 @@ class TestDeterministicChecks:
         check = CodeExecutionCheck()
         trace = Trace(
             task_input="test",
-            final_output='```python\ndef foo(\n    return 42\n```',
+            final_output="```python\ndef foo(\n    return 42\n```",
         )
         result = check.run(trace)
         assert not result.passed
@@ -218,23 +234,21 @@ class TestCompositeSignal:
 class TestStatisticalValidator:
     def test_too_few_eval_cases_defers(self):
         validator = StatisticalValidator(min_eval_cases=5)
-        candidate = CandidateFix(
-            fix_type=FixType.SKILL, content="test", applies_when="test"
-        )
+        candidate = CandidateFix(fix_type=FixType.SKILL, content="test", applies_when="test")
         eval_set = [EvalCase(task_input=f"t{i}") for i in range(3)]
 
         # With callback
         result = validator.validate(
-            candidate, eval_set, lambda t, k: "output",
+            candidate,
+            eval_set,
+            lambda t, k: "output",
             approval_callback=lambda c: True,
         )
         assert result.passed
 
     def test_too_few_no_callback_rejects(self):
         validator = StatisticalValidator(min_eval_cases=5)
-        candidate = CandidateFix(
-            fix_type=FixType.SKILL, content="test", applies_when="test"
-        )
+        candidate = CandidateFix(fix_type=FixType.SKILL, content="test", applies_when="test")
         eval_set = [EvalCase(task_input="t1")]
 
         result = validator.validate(candidate, eval_set, lambda t, k: "output")
@@ -242,14 +256,14 @@ class TestStatisticalValidator:
 
     def test_clear_improvement_passes(self):
         validator = StatisticalValidator(
-            noise_margin=0.05, max_regressions=0, min_confidence=0.5, min_eval_cases=3,
+            noise_margin=0.05,
+            max_regressions=0,
+            min_confidence=0.5,
+            min_eval_cases=3,
         )
-        candidate = CandidateFix(
-            fix_type=FixType.SKILL, content="test", applies_when="test"
-        )
+        candidate = CandidateFix(fix_type=FixType.SKILL, content="test", applies_when="test")
         eval_set = [
-            EvalCase(task_input=f"task {i}", expected_output=f"answer {i}")
-            for i in range(5)
+            EvalCase(task_input=f"task {i}", expected_output=f"answer {i}") for i in range(5)
         ]
 
         # Agent runner: baseline always wrong, treatment always right
@@ -267,11 +281,11 @@ class TestStatisticalValidator:
 
     def test_regression_fails(self):
         validator = StatisticalValidator(
-            noise_margin=0.0, max_regressions=0, min_eval_cases=3,
+            noise_margin=0.0,
+            max_regressions=0,
+            min_eval_cases=3,
         )
-        candidate = CandidateFix(
-            fix_type=FixType.SKILL, content="test", applies_when="test"
-        )
+        candidate = CandidateFix(fix_type=FixType.SKILL, content="test", applies_when="test")
         eval_set = [
             EvalCase(task_input="t1", expected_output="a1"),
             EvalCase(task_input="t2", expected_output="a2"),
@@ -346,10 +360,12 @@ class TestBatchPatternAnalyzer:
 
         # Store some traces
         for i in range(5):
-            store.store_trace(Trace(
-                task_input=f"Parse JSON payload {i}",
-                outcome=Outcome(status=OutcomeStatus.FAILURE, score=0.2),
-            ))
+            store.store_trace(
+                Trace(
+                    task_input=f"Parse JSON payload {i}",
+                    outcome=Outcome(status=OutcomeStatus.FAILURE, score=0.2),
+                )
+            )
 
         # Mock the LLM analysis
         with patch.object(analyzer, "_analyze_cluster", return_value=[]):
@@ -432,13 +448,13 @@ class TestCallbackValidator:
         from agentlearn.validators.human_validator import HumanInLoopValidator
 
         validator = HumanInLoopValidator()
-        candidate = CandidateFix(
-            fix_type=FixType.SKILL, content="test", applies_when="test"
-        )
+        candidate = CandidateFix(fix_type=FixType.SKILL, content="test", applies_when="test")
 
         # With callback — should NOT call click
         result = validator.validate(
-            candidate, [], lambda t, k: "",
+            candidate,
+            [],
+            lambda t, k: "",
             approval_callback=lambda c: True,
         )
         assert result.passed
@@ -447,12 +463,12 @@ class TestCallbackValidator:
         from agentlearn.validators.human_validator import HumanInLoopValidator
 
         validator = HumanInLoopValidator()
-        candidate = CandidateFix(
-            fix_type=FixType.SKILL, content="bad fix", applies_when="test"
-        )
+        candidate = CandidateFix(fix_type=FixType.SKILL, content="bad fix", applies_when="test")
 
         result = validator.validate(
-            candidate, [], lambda t, k: "",
+            candidate,
+            [],
+            lambda t, k: "",
             approval_callback=lambda c: False,
         )
         assert not result.passed
@@ -466,6 +482,7 @@ class TestEnginePhase2:
     def engine(self, tmp_path):
         with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
             from agentlearn.engine import Engine
+
             e = Engine(store=str(tmp_path / "knowledge"))
             yield e
             e._store.close()
@@ -473,10 +490,12 @@ class TestEnginePhase2:
     def test_get_knowledge_returns_string(self, tmp_path):
         with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
             from agentlearn.engine import Engine
+
             e = Engine(store=str(tmp_path / "knowledge2"))
             e._signal = MagicMock()
             e._signal.evaluate.return_value = Outcome(
-                status=OutcomeStatus.SUCCESS, score=0.9,
+                status=OutcomeStatus.SUCCESS,
+                score=0.9,
             )
 
             @e.trace
@@ -493,10 +512,12 @@ class TestEnginePhase2:
         engine._approval_callback = callback
 
         # Store a trace and mock analyzer
-        engine._store.store_trace(Trace(
-            task_input="test",
-            outcome=Outcome(status=OutcomeStatus.FAILURE, score=0.1),
-        ))
+        engine._store.store_trace(
+            Trace(
+                task_input="test",
+                outcome=Outcome(status=OutcomeStatus.FAILURE, score=0.1),
+            )
+        )
         # Add eval cases to avoid quick-win mode
         for i in range(5):
             engine._store.store_eval_case(EvalCase(task_input=f"eval {i}"))
@@ -504,12 +525,15 @@ class TestEnginePhase2:
         engine._analyzer = MagicMock()
         engine._analyzer.analyze_single.return_value = [
             CandidateFix(
-                fix_type=FixType.SKILL, content="fix", applies_when="test",
+                fix_type=FixType.SKILL,
+                content="fix",
+                applies_when="test",
                 source_trace_ids=["t1"],
             )
         ]
         engine._validator = MagicMock()
         engine._validator.validate.return_value = ValidationResult(passed=True)
+        engine.set_agent_runner(lambda task, ids: "dummy")
 
         with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
             engine.learn()

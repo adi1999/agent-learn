@@ -96,11 +96,13 @@ class ContentSafetyCheck:
         for compiled, category in self._patterns:
             match = compiled.search(text)
             if match:
-                threats.append({
-                    "category": category,
-                    "matched": match.group(),
-                    "reason": f"Blocked pattern ({category}): '{match.group()}'",
-                })
+                threats.append(
+                    {
+                        "category": category,
+                        "matched": match.group(),
+                        "reason": f"Blocked pattern ({category}): '{match.group()}'",
+                    }
+                )
 
         # Invisible character detection
         invisible_found = []
@@ -109,11 +111,13 @@ class ContentSafetyCheck:
                 invisible_found.append(repr(char))
 
         if invisible_found:
-            threats.append({
-                "category": "invisible_chars",
-                "matched": ", ".join(invisible_found),
-                "reason": f"Invisible unicode characters detected: {', '.join(invisible_found)}",
-            })
+            threats.append(
+                {
+                    "category": "invisible_chars",
+                    "matched": ", ".join(invisible_found),
+                    "reason": f"Invisible unicode characters detected: {', '.join(invisible_found)}",
+                }
+            )
 
         return SafetyResult(safe=len(threats) == 0, threats=threats)
 
@@ -129,7 +133,5 @@ class ContentSafetyCheck:
             if result.safe:
                 safe_items.append(item)
             else:
-                logger.warning(
-                    f"Blocked unsafe knowledge item {item.item_id[:8]}: {result.reason}"
-                )
+                logger.warning(f"Blocked unsafe knowledge item {item.item_id[:8]}: {result.reason}")
         return safe_items
