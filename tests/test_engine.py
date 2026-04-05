@@ -810,3 +810,213 @@ class TestStreamingTracer:
         assert trace.steps[0].metadata["streamed"] is True
         assert trace.steps[0].metadata["input_tokens"] == 10
         assert trace.steps[0].metadata["output_tokens"] == 5
+
+
+class TestSmartInjector:
+    """Tests for SmartInjector with layered context."""
+
+    def test_pinned_items_always_injected(self, engine):
+        engine._signal = MagicMock()
+        engine._signal.evaluate.return_value = Outcome(status=OutcomeStatus.SUCCESS, score=0.9)
+
+        with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
+            # Store a pinned item
+            item = KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="ALWAYS DO THIS",
+                applies_when="everything",
+                status=KnowledgeStatus.ACTIVE,
+                priority="pinned",
+            )
+            engine._store.store(item)
+
+        knowledge = engine.get_knowledge("completely unrelated query")
+        assert "ALWAYS DO THIS" in knowledge
+        assert "CORE RULES" in knowledge
+
+    def test_normal_items_in_relevant_section(self, engine):
+        engine._signal = MagicMock()
+        engine._signal.evaluate.return_value = Outcome(status=OutcomeStatus.SUCCESS, score=0.9)
+
+        with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
+            engine._store.store(
+                KnowledgeItem(
+                    fix_type=FixType.SKILL,
+                    content="specific fix",
+                    applies_when="edge case",
+                    status=KnowledgeStatus.ACTIVE,
+                )
+            )
+
+        knowledge = engine.get_knowledge("edge case query")
+        if knowledge:
+            assert "RELEVANT KNOWLEDGE" in knowledge
+
+    def test_pinned_not_duplicated(self, engine):
+        with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
+            item = KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="pinned content",
+                applies_when="test",
+                status=KnowledgeStatus.ACTIVE,
+                priority="pinned",
+            )
+            engine._store.store(item)
+
+        knowledge = engine.get_knowledge("test")
+        # Should appear exactly once
+        assert knowledge.count("pinned content") == 1
+
+    def test_default_injector_is_smart(self, engine):
+        from agentlearn.injector.smart import SmartInjector
+
+        assert isinstance(engine._injector, SmartInjector)
+
+
+class TestPinUnpin:
+    """Tests for knowledge pin/unpin management."""
+
+    def test_pin(self, engine):
+        with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
+            item = KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="rule",
+                applies_when="test",
+                status=KnowledgeStatus.ACTIVE,
+            )
+            engine._store.store(item)
+
+        result = engine.knowledge.pin(item.item_id)
+        assert result is not None
+        assert result.priority == "pinned"
+
+        retrieved = engine._store.get(item.item_id)
+        assert retrieved.priority == "pinned"
+
+    def test_unpin(self, engine):
+        with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
+            item = KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="rule",
+                applies_when="test",
+                status=KnowledgeStatus.ACTIVE,
+                priority="pinned",
+            )
+            engine._store.store(item)
+
+        result = engine.knowledge.unpin(item.item_id)
+        assert result is not None
+        assert result.priority == "normal"
+
+    def test_pin_nonexistent(self, engine):
+        assert engine.knowledge.pin("nonexistent") is None
+
+
+class TestAutoInject:
+    """Tests for auto_inject parameter on @trace."""
+
+    def test_auto_inject_passes_knowledge_kwarg(self, engine):
+        engine._signal = MagicMock()
+        engine._signal.evaluate.return_value = Outcome(status=OutcomeStatus.SUCCESS, score=0.9)
+
+        received_knowledge = []
+
+        @engine.trace(auto_inject=True)
+        def my_agent(task_input, knowledge=""):
+            received_knowledge.append(knowledge)
+            return "done"
+
+        my_agent("test")
+        assert len(received_knowledge) == 1
+        assert isinstance(received_knowledge[0], str)
+
+    def test_auto_inject_without_knowledge_param(self, engine):
+        engine._signal = MagicMock()
+        engine._signal.evaluate.return_value = Outcome(status=OutcomeStatus.SUCCESS, score=0.9)
+
+        @engine.trace(auto_inject=True)
+        def my_agent(task_input):
+            return "done"
+
+        result = my_agent("test")
+        assert result == "done"
+        # last_knowledge should still be populated
+        assert isinstance(engine.last_knowledge, str)
+
+    def test_auto_inject_false_by_default(self, engine):
+        engine._signal = MagicMock()
+        engine._signal.evaluate.return_value = Outcome(status=OutcomeStatus.SUCCESS, score=0.9)
+
+        received = []
+
+        @engine.trace
+        def my_agent(task_input, knowledge="DEFAULT"):
+            received.append(knowledge)
+            return "done"
+
+        my_agent("test")
+        assert received[0] == "DEFAULT"  # Not overwritten
+
+    @pytest.mark.asyncio
+    async def test_auto_inject_async(self, engine):
+        engine._signal = MagicMock()
+        engine._signal.evaluate.return_value = Outcome(status=OutcomeStatus.SUCCESS, score=0.9)
+
+        received = []
+
+        @engine.trace(auto_inject=True)
+        async def my_agent(task_input, knowledge=""):
+            received.append(knowledge)
+            return "done"
+
+        await my_agent("test")
+        assert len(received) == 1
+        assert isinstance(received[0], str)
+
+
+class TestCustomScorer:
+    """Tests for custom scorer on eval."""
+
+    def test_case_level_scorer(self):
+        from agentlearn.utils.scoring import score_output
+
+        case = EvalCase(
+            task_input="What is 2+2?",
+            scorer=lambda output, task: 1.0 if "4" in output else 0.0,
+        )
+        assert score_output("The answer is 4", case) == 1.0
+        assert score_output("The answer is 5", case) == 0.0
+
+    def test_global_scorer_fallback(self):
+        from agentlearn.utils.scoring import score_output
+
+        case = EvalCase(task_input="test")
+        scorer = lambda output, task: 0.75
+        assert score_output("anything", case, scorer=scorer) == 0.75
+
+    def test_case_scorer_overrides_global(self):
+        from agentlearn.utils.scoring import score_output
+
+        case = EvalCase(
+            task_input="test",
+            scorer=lambda output, task: 1.0,
+        )
+        assert score_output("x", case, scorer=lambda o, t: 0.0) == 1.0
+
+    def test_scorer_fallback_to_expected_output(self):
+        from agentlearn.utils.scoring import score_output
+
+        case = EvalCase(task_input="test", expected_output="hello")
+        assert score_output("hello", case) == 1.0
+
+    def test_batch_evaluator_with_scorer(self):
+        from agentlearn.evaluator import BatchEvaluator
+
+        evaluator = BatchEvaluator(
+            pass_threshold=0.5,
+            scorer=lambda output, task: 0.9 if output else 0.0,
+        )
+        cases = [EvalCase(task_input="test")]
+        report = evaluator.run(lambda t: "result", cases)
+        assert report.passed == 1
+        assert report.avg_score == 0.9

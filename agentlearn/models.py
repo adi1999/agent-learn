@@ -3,9 +3,9 @@
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def _utcnow() -> datetime:
@@ -102,6 +102,7 @@ class KnowledgeItem(BaseModel):
     content: str
     applies_when: str
     tags: list[str] = Field(default_factory=list)
+    priority: str = "normal"  # "pinned" | "normal"
 
     # Provenance
     source_trace_ids: list[str] = Field(default_factory=list)
@@ -148,12 +149,15 @@ class ValidationResult(BaseModel):
 
 
 class EvalCase(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     eval_id: str = Field(default_factory=_new_id)
     task_input: str
     expected_output: Optional[str] = None
     judge_prompt: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
     source: str = "auto"
+    scorer: Optional[Callable[[str, str], float]] = Field(default=None, exclude=True)
     created_at: datetime = Field(default_factory=_utcnow)
 
 

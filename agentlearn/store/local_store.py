@@ -57,6 +57,7 @@ class LocalStore:
                     content TEXT NOT NULL,
                     applies_when TEXT NOT NULL,
                     tags TEXT DEFAULT '[]',
+                    priority TEXT DEFAULT 'normal',
                     source_trace_ids TEXT DEFAULT '[]',
                     analyzer_id TEXT DEFAULT '',
                     created_at TEXT NOT NULL,
@@ -123,6 +124,7 @@ class LocalStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge(status);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_priority ON knowledge(priority);
                 CREATE INDEX IF NOT EXISTS idx_traces_analyzed ON traces(analyzed);
                 CREATE INDEX IF NOT EXISTS idx_traces_outcome ON traces(outcome_status);
 
@@ -148,7 +150,44 @@ class LocalStore:
                     INSERT INTO traces_fts(rowid, task_input, final_output, outcome_reasoning)
                     VALUES (NEW.rowid, NEW.task_input, NEW.final_output, NEW.outcome_reasoning);
                 END;
+
+                -- FTS5 for knowledge items (hybrid search)
+                CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+                    content, applies_when,
+                    content=knowledge, content_rowid=rowid
+                );
+
+                CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
+                    INSERT INTO knowledge_fts(rowid, content, applies_when)
+                    VALUES (NEW.rowid, NEW.content, NEW.applies_when);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
+                    INSERT INTO knowledge_fts(knowledge_fts, rowid, content, applies_when)
+                    VALUES ('delete', OLD.rowid, OLD.content, OLD.applies_when);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
+                    INSERT INTO knowledge_fts(knowledge_fts, rowid, content, applies_when)
+                    VALUES ('delete', OLD.rowid, OLD.content, OLD.applies_when);
+                    INSERT INTO knowledge_fts(rowid, content, applies_when)
+                    VALUES (NEW.rowid, NEW.content, NEW.applies_when);
+                END;
             """)
+        self._migrate_db()
+
+    def _migrate_db(self) -> None:
+        """Handle schema migrations for existing databases."""
+        with self._lock:
+            # Add priority column if missing (pre-v0.5 databases)
+            try:
+                self._conn.execute("SELECT priority FROM knowledge LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute(
+                    "ALTER TABLE knowledge ADD COLUMN priority TEXT DEFAULT 'normal'"
+                )
+                self._conn.commit()
+                logger.info("Migrated: added priority column to knowledge table")
 
     def close(self) -> None:
         """Close the database connection."""
@@ -161,17 +200,19 @@ class LocalStore:
         with self._lock:
             self._conn.execute(
                 """INSERT OR REPLACE INTO knowledge
-                   (item_id, fix_type, content, applies_when, tags, source_trace_ids,
-                    analyzer_id, created_at, validation_improvement, validation_regressions,
+                   (item_id, fix_type, content, applies_when, tags, priority,
+                    source_trace_ids, analyzer_id, created_at,
+                    validation_improvement, validation_regressions,
                     status, times_injected, times_helped, effectiveness_rate,
                     last_injected_at, last_validated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item.item_id,
                     item.fix_type.value,
                     item.content,
                     item.applies_when,
                     json.dumps(item.tags),
+                    item.priority,
                     json.dumps(item.source_trace_ids),
                     item.analyzer_id,
                     item.created_at.isoformat(),
@@ -291,6 +332,103 @@ class LocalStore:
             else:
                 rows = self._conn.execute("SELECT * FROM knowledge").fetchall()
         return [self._row_to_knowledge(row) for row in rows]
+
+    def list_pinned(self, status: str = "active") -> list[KnowledgeItem]:
+        """List all pinned knowledge items."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge WHERE status = ? AND priority = 'pinned'",
+                (status,),
+            ).fetchall()
+        return [self._row_to_knowledge(row) for row in rows]
+
+    def _keyword_search(self, query: str, status: str = "active", limit: int = 20) -> list[str]:
+        """FTS5 keyword search on knowledge items. Returns ordered item_ids."""
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    """SELECT knowledge.item_id FROM knowledge_fts
+                       JOIN knowledge ON knowledge.rowid = knowledge_fts.rowid
+                       WHERE knowledge_fts MATCH ?
+                       AND knowledge.status = ?
+                       ORDER BY rank
+                       LIMIT ?""",
+                    (query, status, limit),
+                ).fetchall()
+            return [row["item_id"] for row in rows]
+        except sqlite3.OperationalError:
+            # Malformed FTS5 query (special characters, etc.)
+            return []
+
+    def _embedding_search(
+        self,
+        query: str,
+        status: str = "active",
+        tags: Optional[list[str]] = None,
+        limit: int = 20,
+    ) -> list[str]:
+        """Embedding cosine similarity search. Returns ordered item_ids."""
+        items = self.list_all(status=status)
+        if tags:
+            items = [i for i in items if any(t in i.tags for t in tags)]
+        if not items:
+            return []
+        try:
+            query_embedding = get_embedding(query)
+        except Exception:
+            return [i.item_id for i in items[:limit]]
+
+        scored = []
+        for item in items:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT embedding FROM embeddings WHERE item_id = ?",
+                    (item.item_id,),
+                ).fetchone()
+            if row is None:
+                continue
+            item_embedding = deserialize_embedding(row["embedding"])
+            score = cosine_similarity(query_embedding, item_embedding)
+            scored.append((score, item.item_id))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item_id for _, item_id in scored[:limit]]
+
+    @staticmethod
+    def _reciprocal_rank_fusion(
+        ranked_lists: list[list[str]], k: int = 60
+    ) -> list[tuple[str, float]]:
+        """Merge ranked lists using Reciprocal Rank Fusion."""
+        scores: dict[str, float] = {}
+        for ranked_list in ranked_lists:
+            for rank, item_id in enumerate(ranked_list):
+                scores[item_id] = scores.get(item_id, 0) + 1.0 / (k + rank + 1)
+        return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+    def hybrid_query(
+        self,
+        task_context: str,
+        tags: Optional[list[str]] = None,
+        status: str = "active",
+        limit: int = 5,
+        rrf_k: int = 60,
+    ) -> list[KnowledgeItem]:
+        """Retrieve relevant knowledge using hybrid FTS5 + embedding search with RRF."""
+        fetch_limit = limit * 4  # Over-fetch for better RRF merging
+
+        embedding_ids = self._embedding_search(
+            task_context, status=status, tags=tags, limit=fetch_limit
+        )
+        keyword_ids = self._keyword_search(task_context, status=status, limit=fetch_limit)
+
+        ranked = self._reciprocal_rank_fusion([embedding_ids, keyword_ids], k=rrf_k)
+
+        result = []
+        for item_id, _score in ranked[:limit]:
+            item = self.get(item_id)
+            if item is not None:
+                result.append(item)
+        return result
 
     def get(self, item_id: str) -> Optional[KnowledgeItem]:
         """Get a single knowledge item by ID."""
@@ -542,6 +680,7 @@ class LocalStore:
             content=row["content"],
             applies_when=row["applies_when"],
             tags=json.loads(row["tags"]),
+            priority=row["priority"] if "priority" in row.keys() else "normal",
             source_trace_ids=json.loads(row["source_trace_ids"]),
             analyzer_id=row["analyzer_id"],
             created_at=datetime.fromisoformat(row["created_at"]),

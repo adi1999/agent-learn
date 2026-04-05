@@ -48,11 +48,18 @@ class EmbeddingInjector:
     ) -> InjectionResult:
         """Select and format relevant knowledge for injection."""
         try:
-            items = knowledge_store.query(
-                task_context=task_input,
-                status="active",
-                limit=self.top_k,
-            )
+            if hasattr(knowledge_store, "hybrid_query"):
+                items = knowledge_store.hybrid_query(
+                    task_context=task_input,
+                    status="active",
+                    limit=self.top_k,
+                )
+            else:
+                items = knowledge_store.query(
+                    task_context=task_input,
+                    status="active",
+                    limit=self.top_k,
+                )
         except Exception as e:
             logger.warning(f"Knowledge query failed: {e}")
             items = []

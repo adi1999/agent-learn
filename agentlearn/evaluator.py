@@ -18,9 +18,10 @@ logger = get_logger("evaluator")
 class BatchEvaluator:
     """Runs an agent function against eval cases and produces an aggregate report."""
 
-    def __init__(self, signal=None, pass_threshold: float = 0.7):
+    def __init__(self, signal=None, pass_threshold: float = 0.7, scorer=None):
         self._signal = signal
         self.pass_threshold = pass_threshold
+        self._scorer = scorer
 
     def run(
         self,
@@ -46,7 +47,7 @@ class BatchEvaluator:
         case_start = time.time()
         try:
             output = agent_func(case.task_input)
-            score = score_output(str(output), case, signal=self._signal)
+            score = score_output(str(output), case, signal=self._signal, scorer=self._scorer)
             return EvalResult(
                 eval_id=case.eval_id,
                 task_input=case.task_input,
@@ -101,7 +102,7 @@ class BatchEvaluator:
                 output = await agent_func(case.task_input)
             else:
                 output = await asyncio.to_thread(agent_func, case.task_input)
-            score = score_output(str(output), case, signal=self._signal)
+            score = score_output(str(output), case, signal=self._signal, scorer=self._scorer)
             return EvalResult(
                 eval_id=case.eval_id,
                 task_input=case.task_input,

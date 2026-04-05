@@ -60,18 +60,22 @@ class TestKnowledgeCRUD:
 
     def test_list_all(self, store):
         for i in range(3):
-            store.store(KnowledgeItem(
-                fix_type=FixType.SKILL,
-                content=f"Skill {i}",
-                applies_when=f"When {i}",
-                status=KnowledgeStatus.ACTIVE,
-            ))
-        store.store(KnowledgeItem(
-            fix_type=FixType.CHECKLIST,
-            content="Candidate",
-            applies_when="When candidate",
-            status=KnowledgeStatus.CANDIDATE,
-        ))
+            store.store(
+                KnowledgeItem(
+                    fix_type=FixType.SKILL,
+                    content=f"Skill {i}",
+                    applies_when=f"When {i}",
+                    status=KnowledgeStatus.ACTIVE,
+                )
+            )
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.CHECKLIST,
+                content="Candidate",
+                applies_when="When candidate",
+                status=KnowledgeStatus.CANDIDATE,
+            )
+        )
 
         all_items = store.list_all()
         assert len(all_items) == 4
@@ -146,18 +150,30 @@ class TestKnowledgeCRUD:
         assert abs(retrieved.effectiveness_rate - 0.6) < 0.01
 
     def test_count_by_status(self, store):
-        store.store(KnowledgeItem(
-            fix_type=FixType.SKILL, content="a", applies_when="x",
-            status=KnowledgeStatus.ACTIVE,
-        ))
-        store.store(KnowledgeItem(
-            fix_type=FixType.SKILL, content="b", applies_when="y",
-            status=KnowledgeStatus.ACTIVE,
-        ))
-        store.store(KnowledgeItem(
-            fix_type=FixType.SKILL, content="c", applies_when="z",
-            status=KnowledgeStatus.CANDIDATE,
-        ))
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="a",
+                applies_when="x",
+                status=KnowledgeStatus.ACTIVE,
+            )
+        )
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="b",
+                applies_when="y",
+                status=KnowledgeStatus.ACTIVE,
+            )
+        )
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="c",
+                applies_when="z",
+                status=KnowledgeStatus.CANDIDATE,
+            )
+        )
 
         counts = store.count_by_status()
         assert counts.get("active") == 2
@@ -166,7 +182,9 @@ class TestKnowledgeCRUD:
     def test_export_and_import(self, store):
         items = [
             KnowledgeItem(
-                fix_type=FixType.SKILL, content=f"Skill {i}", applies_when=f"When {i}",
+                fix_type=FixType.SKILL,
+                content=f"Skill {i}",
+                applies_when=f"When {i}",
                 status=KnowledgeStatus.ACTIVE,
             )
             for i in range(3)
@@ -211,15 +229,19 @@ class TestTraceCRUD:
 
     def test_unanalyzed_traces_failure_first(self, store):
         # Store success trace
-        store.store_trace(Trace(
-            task_input="success",
-            outcome=Outcome(status=OutcomeStatus.SUCCESS, score=0.9),
-        ))
+        store.store_trace(
+            Trace(
+                task_input="success",
+                outcome=Outcome(status=OutcomeStatus.SUCCESS, score=0.9),
+            )
+        )
         # Store failure trace
-        store.store_trace(Trace(
-            task_input="failure",
-            outcome=Outcome(status=OutcomeStatus.FAILURE, score=0.1),
-        ))
+        store.store_trace(
+            Trace(
+                task_input="failure",
+                outcome=Outcome(status=OutcomeStatus.FAILURE, score=0.1),
+            )
+        )
 
         traces = store.get_unanalyzed_traces(prioritize_failures=True)
         assert len(traces) == 2
@@ -239,15 +261,24 @@ class TestTraceCRUD:
         assert len(unanalyzed) == 0
 
     def test_get_traces_by_status(self, store):
-        store.store_trace(Trace(
-            task_input="s1", outcome=Outcome(status=OutcomeStatus.SUCCESS),
-        ))
-        store.store_trace(Trace(
-            task_input="f1", outcome=Outcome(status=OutcomeStatus.FAILURE),
-        ))
-        store.store_trace(Trace(
-            task_input="s2", outcome=Outcome(status=OutcomeStatus.SUCCESS),
-        ))
+        store.store_trace(
+            Trace(
+                task_input="s1",
+                outcome=Outcome(status=OutcomeStatus.SUCCESS),
+            )
+        )
+        store.store_trace(
+            Trace(
+                task_input="f1",
+                outcome=Outcome(status=OutcomeStatus.FAILURE),
+            )
+        )
+        store.store_trace(
+            Trace(
+                task_input="s2",
+                outcome=Outcome(status=OutcomeStatus.SUCCESS),
+            )
+        )
 
         successes = store.get_traces(status="success")
         assert len(successes) == 2
@@ -256,12 +287,18 @@ class TestTraceCRUD:
         assert len(failures) == 1
 
     def test_count_traces(self, store):
-        store.store_trace(Trace(
-            task_input="s", outcome=Outcome(status=OutcomeStatus.SUCCESS),
-        ))
-        store.store_trace(Trace(
-            task_input="f", outcome=Outcome(status=OutcomeStatus.FAILURE),
-        ))
+        store.store_trace(
+            Trace(
+                task_input="s",
+                outcome=Outcome(status=OutcomeStatus.SUCCESS),
+            )
+        )
+        store.store_trace(
+            Trace(
+                task_input="f",
+                outcome=Outcome(status=OutcomeStatus.FAILURE),
+            )
+        )
 
         counts = store.count_traces()
         assert counts["total"] == 2
@@ -320,15 +357,174 @@ class TestQuery:
         assert results == []
 
     def test_query_respects_status(self, store):
-        store.store(KnowledgeItem(
-            fix_type=FixType.SKILL, content="active", applies_when="test",
-            status=KnowledgeStatus.ACTIVE,
-        ))
-        store.store(KnowledgeItem(
-            fix_type=FixType.SKILL, content="deprecated", applies_when="test",
-            status=KnowledgeStatus.DEPRECATED,
-        ))
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="active",
+                applies_when="test",
+                status=KnowledgeStatus.ACTIVE,
+            )
+        )
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="deprecated",
+                applies_when="test",
+                status=KnowledgeStatus.DEPRECATED,
+            )
+        )
 
         active = store.query(task_context="test", status="active")
         assert len(active) == 1
         assert active[0].content == "active"
+
+
+class TestHybridSearch:
+    """Tests for hybrid FTS5 + embedding search with RRF."""
+
+    @pytest.fixture
+    def store(self, tmp_path):
+        with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
+            s = LocalStore(path=str(tmp_path / "knowledge"))
+            yield s
+            s.close()
+
+    def test_keyword_search_returns_matches(self, store):
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="position column is TEXT type",
+                applies_when="drivers championship queries",
+                status=KnowledgeStatus.ACTIVE,
+            )
+        )
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="use LIMIT 50",
+                applies_when="all queries",
+                status=KnowledgeStatus.ACTIVE,
+            )
+        )
+
+        results = store._keyword_search("position TEXT", status="active")
+        assert len(results) >= 1
+
+    def test_keyword_search_malformed_query_returns_empty(self, store):
+        results = store._keyword_search('invalid OR AND "unclosed', status="active")
+        assert results == []
+
+    def test_rrf_merges_ranked_lists(self):
+        list1 = ["a", "b", "c"]
+        list2 = ["b", "d", "a"]
+        merged = LocalStore._reciprocal_rank_fusion([list1, list2], k=60)
+        ids = [item_id for item_id, _ in merged]
+        # "b" appears in both lists (rank 1 in list1, rank 0 in list2) — should rank high
+        assert "b" in ids[:2]
+        # "a" appears in both too
+        assert "a" in ids[:3]
+        # All 4 unique items present
+        assert set(ids) == {"a", "b", "c", "d"}
+
+    def test_hybrid_query_returns_results(self, store):
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="date parsing requires TO_DATE",
+                applies_when="race wins date handling",
+                status=KnowledgeStatus.ACTIVE,
+            )
+        )
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.CHECKLIST,
+                content="always check NULL values",
+                applies_when="race results aggregation",
+                status=KnowledgeStatus.ACTIVE,
+            )
+        )
+
+        results = store.hybrid_query(task_context="date parsing", status="active", limit=2)
+        assert len(results) >= 1
+
+    def test_hybrid_query_empty_store(self, store):
+        results = store.hybrid_query(task_context="anything", status="active")
+        assert results == []
+
+
+class TestPriority:
+    """Tests for knowledge item priority (pinned/normal)."""
+
+    @pytest.fixture
+    def store(self, tmp_path):
+        with patch("agentlearn.store.local_store.get_embedding", side_effect=mock_get_embedding):
+            s = LocalStore(path=str(tmp_path / "knowledge"))
+            yield s
+            s.close()
+
+    def test_priority_persists(self, store):
+        item = KnowledgeItem(
+            fix_type=FixType.SKILL,
+            content="pinned rule",
+            applies_when="always",
+            status=KnowledgeStatus.ACTIVE,
+            priority="pinned",
+        )
+        store.store(item)
+        retrieved = store.get(item.item_id)
+        assert retrieved.priority == "pinned"
+
+    def test_default_priority_is_normal(self, store):
+        item = KnowledgeItem(
+            fix_type=FixType.SKILL,
+            content="normal rule",
+            applies_when="sometimes",
+            status=KnowledgeStatus.ACTIVE,
+        )
+        store.store(item)
+        retrieved = store.get(item.item_id)
+        assert retrieved.priority == "normal"
+
+    def test_list_pinned(self, store):
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="pinned",
+                applies_when="always",
+                status=KnowledgeStatus.ACTIVE,
+                priority="pinned",
+            )
+        )
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="normal",
+                applies_when="sometimes",
+                status=KnowledgeStatus.ACTIVE,
+                priority="normal",
+            )
+        )
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="pinned deprecated",
+                applies_when="x",
+                status=KnowledgeStatus.DEPRECATED,
+                priority="pinned",
+            )
+        )
+
+        pinned = store.list_pinned(status="active")
+        assert len(pinned) == 1
+        assert pinned[0].content == "pinned"
+
+    def test_list_pinned_empty(self, store):
+        store.store(
+            KnowledgeItem(
+                fix_type=FixType.SKILL,
+                content="normal",
+                applies_when="x",
+                status=KnowledgeStatus.ACTIVE,
+            )
+        )
+        assert store.list_pinned(status="active") == []

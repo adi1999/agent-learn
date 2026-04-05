@@ -11,7 +11,7 @@ from typing import Any, Callable, Optional
 import click
 
 from .analyzers.llm_analyzer import LLMAnalyzer
-from .injector.simple import SimpleInjector
+from .injector.smart import SmartInjector
 from .evaluator import BatchEvaluator
 from .models import (
     AuditReport,
@@ -80,6 +80,24 @@ class KnowledgeManager:
 
     def deprecate(self, item_id: str, reason: str = "") -> None:
         self._store.deprecate(item_id, reason)
+
+    def pin(self, item_id: str) -> Optional[KnowledgeItem]:
+        """Pin a knowledge item (always injected regardless of relevance)."""
+        item = self._store.get(item_id)
+        if item is None:
+            return None
+        item.priority = "pinned"
+        self._store.update_item(item)
+        return item
+
+    def unpin(self, item_id: str) -> Optional[KnowledgeItem]:
+        """Unpin a knowledge item (back to relevance-searched)."""
+        item = self._store.get(item_id)
+        if item is None:
+            return None
+        item.priority = "normal"
+        self._store.update_item(item)
+        return item
 
     def export(self) -> list[KnowledgeItem]:
         return self._store.export_all()
@@ -381,7 +399,7 @@ class Engine:
         self._analyzer = analyzer or LLMAnalyzer(model=model, cost_tracker=self._cost_tracker)
         self._validator = validator or HumanInLoopValidator()
         self._signal = signal or LLMJudge(model=model, cost_tracker=self._cost_tracker)
-        self._injector = injector or SimpleInjector()
+        self._injector = injector or SmartInjector()
 
         # Managers
         self._knowledge_manager = KnowledgeManager(self._store)
@@ -434,7 +452,16 @@ class Engine:
             logger.warning(f"get_knowledge_async failed: {e}")
             return ""
 
-    def trace(self, func=None, *, input_extractor=None, output_extractor=None):
+    @property
+    def last_knowledge(self) -> str:
+        """Access the most recent knowledge injection result.
+
+        Useful with auto_inject=True when the agent function does not
+        accept a 'knowledge' parameter but still needs access.
+        """
+        return self._last_injection.system_prompt_additions
+
+    def trace(self, func=None, *, input_extractor=None, output_extractor=None, auto_inject=False):
         """Decorator that observes an agent function.
 
         Records traces (input, output, steps) and evaluates outcomes.
@@ -452,10 +479,16 @@ class Engine:
             output_extractor: Optional callable(result) -> str that extracts
                 a meaningful string from the agent's return value.
                 Defaults to str(result).
+            auto_inject: If True, automatically call get_knowledge() before
+                running the agent. If the agent accepts a 'knowledge' kwarg,
+                the knowledge text is passed as that kwarg.
 
         Usage:
             @engine.trace
             def simple_agent(task_input): ...
+
+            @engine.trace(auto_inject=True)
+            def smart_agent(task_input, knowledge=""): ...
 
             @engine.trace(
                 input_extractor=lambda name, **kw: name,
@@ -464,22 +497,23 @@ class Engine:
             async def complex_agent(business_name, config=None): ...
         """
         if func is None:
-            # Called with arguments: @engine.trace(input_extractor=..., ...)
-            return lambda f: self._make_wrapper(f, input_extractor, output_extractor)
-        # Called without arguments: @engine.trace
-        return self._make_wrapper(func, input_extractor, output_extractor)
+            return lambda f: self._make_wrapper(f, input_extractor, output_extractor, auto_inject)
+        return self._make_wrapper(func, input_extractor, output_extractor, auto_inject)
 
-    def _make_wrapper(self, func, input_extractor, output_extractor):
+    def _make_wrapper(self, func, input_extractor, output_extractor, auto_inject=False):
         """Dispatch to sync or async wrapper based on the decorated function."""
         in_ext = input_extractor or self._default_input_extractor or _default_input_extractor
         out_ext = output_extractor or self._default_output_extractor or _default_output_extractor
 
         if inspect.iscoroutinefunction(func):
-            return self._make_async_wrapper(func, in_ext, out_ext)
-        return self._make_sync_wrapper(func, in_ext, out_ext)
+            return self._make_async_wrapper(func, in_ext, out_ext, auto_inject)
+        return self._make_sync_wrapper(func, in_ext, out_ext, auto_inject)
 
-    def _make_sync_wrapper(self, func, in_ext, out_ext):
+    def _make_sync_wrapper(self, func, in_ext, out_ext, auto_inject=False):
         """Create a synchronous trace wrapper."""
+        accepts_knowledge = (
+            "knowledge" in inspect.signature(func).parameters if auto_inject else False
+        )
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -496,6 +530,12 @@ class Engine:
 
             # Reset injection tracking
             self._last_injection = InjectionResult()
+
+            # Auto-inject knowledge if enabled
+            if auto_inject and not is_control:
+                knowledge_text = self.get_knowledge(task_input)
+                if accepts_knowledge:
+                    kwargs["knowledge"] = knowledge_text
 
             # 1. Start trace
             trace_id = self._tracer.start_trace(
@@ -520,8 +560,11 @@ class Engine:
 
         return wrapper
 
-    def _make_async_wrapper(self, func, in_ext, out_ext):
+    def _make_async_wrapper(self, func, in_ext, out_ext, auto_inject=False):
         """Create an async trace wrapper."""
+        accepts_knowledge = (
+            "knowledge" in inspect.signature(func).parameters if auto_inject else False
+        )
 
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -536,6 +579,12 @@ class Engine:
                 self.injection_enabled = False
 
             self._last_injection = InjectionResult()
+
+            # Auto-inject knowledge if enabled
+            if auto_inject and not is_control:
+                knowledge_text = await self.get_knowledge_async(task_input)
+                if accepts_knowledge:
+                    kwargs["knowledge"] = knowledge_text
 
             trace_id = self._tracer.start_trace(
                 task_input,
@@ -797,6 +846,7 @@ class Engine:
         tags: Optional[list[str]] = None,
         name: str = "",
         pass_threshold: float = 0.7,
+        scorer: Optional[Callable[[str, str], float]] = None,
     ) -> EvalRunReport:
         """Run batch evaluation of agent_func against the eval set.
 
@@ -805,11 +855,14 @@ class Engine:
             tags: Optional tag filter for eval cases.
             name: Optional name for this eval run.
             pass_threshold: Score >= this counts as passed.
+            scorer: Optional custom scorer(agent_output, task_input) -> float.
 
         Returns:
             EvalRunReport with aggregate metrics and per-case results.
         """
-        evaluator = BatchEvaluator(signal=self._signal, pass_threshold=pass_threshold)
+        evaluator = BatchEvaluator(
+            signal=self._signal, pass_threshold=pass_threshold, scorer=scorer
+        )
         cases = self._store.list_eval_cases(tags=tags)
         if not cases:
             logger.warning("No eval cases found. Import a dataset first.")
@@ -825,12 +878,15 @@ class Engine:
         tags: Optional[list[str]] = None,
         name: str = "",
         pass_threshold: float = 0.7,
+        scorer: Optional[Callable[[str, str], float]] = None,
     ) -> EvalRunReport:
         """Async batch evaluation of agent_func against the eval set.
 
         agent_func can be sync or async. Sync functions are called in a thread.
         """
-        evaluator = BatchEvaluator(signal=self._signal, pass_threshold=pass_threshold)
+        evaluator = BatchEvaluator(
+            signal=self._signal, pass_threshold=pass_threshold, scorer=scorer
+        )
         cases = self._store.list_eval_cases(tags=tags)
         if not cases:
             logger.warning("No eval cases found. Import a dataset first.")
