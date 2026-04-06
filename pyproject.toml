@@ -4,11 +4,36 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentlearn"
-version = "0.3.0"
+version = "0.5.0"
 description = "A recursive learning framework that gives any AI agent a self-improvement loop with memory"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+authors = [
+    { name = "Aditya Dhookia", email = "adi1999@users.noreply.github.com" },
+]
+keywords = [
+    "ai",
+    "agents",
+    "learning",
+    "self-improvement",
+    "llm",
+    "knowledge",
+    "reinforcement",
+    "memory",
+    "evaluation",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "pydantic>=2.0",
     "openai>=1.0",
@@ -19,6 +44,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[project.urls]
+Homepage = "https://github.com/adi1999/agent-learn"
+Repository = "https://github.com/adi1999/agent-learn"
+Issues = "https://github.com/adi1999/agent-learn/issues"
 
 [project.scripts]
 agentlearn = "agentlearn.cli:cli"
